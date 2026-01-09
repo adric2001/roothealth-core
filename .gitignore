@@ -1,0 +1,10 @@
+venv/
+.terraform/
+*.tfstate
+*.tfstate.backup
+my-key
+my-key.pub
+__pycache__/
+*.pyc
+.DS_Store
+.env
