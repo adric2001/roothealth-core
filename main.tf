@@ -224,7 +224,7 @@ resource "aws_iam_role_policy_attachment" "apprunner_access_attach" {
        image_repository_type = "ECR"
       
        image_configuration {
-         port = "8501"
+         port = "8080"
          runtime_environment_variables = {
            DYNAMODB_TABLE = aws_dynamodb_table.health_stats.name
          }
