@@ -58,6 +58,10 @@ output "dynamodb_table_name" {
   value = aws_dynamodb_table.health_stats.name
 }
 
+output "ecr_url" {
+  value = aws_ecr_repository.app_repo.repository_url
+}
+
 resource "aws_iam_role" "ingestion_role" {
   name = "roothealth_ingestion_role"
 
@@ -113,7 +117,7 @@ resource "aws_lambda_function" "ingestor" {
   role          = aws_iam_role.ingestion_role.arn
   handler       = "lambda_function.lambda_handler"
   runtime       = "python3.9"
-  
+   
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
 
   environment {
@@ -149,30 +153,90 @@ resource "aws_ecr_repository" "app_repo" {
   force_delete         = true
 }
 
-resource "aws_apprunner_service" "dashboard" {
-  service_name = "roothealth-dashboard"
+resource "aws_iam_role" "apprunner_role" {
+  name = "roothealth_apprunner_role"
 
-  source_configuration {
-    authentication_configuration {
-      access_role_arn = aws_iam_role.apprunner_access_role.arn
-    }
-    
-    auto_deployments_enabled = true 
-
-    image_repository {
-      image_identifier      = "${aws_ecr_repository.app_repo.repository_url}:latest"
-      image_repository_type = "ECR"
-      
-      image_configuration {
-        port = "8501"
-        runtime_environment_variables = {
-          DYNAMODB_TABLE = aws_dynamodb_table.health_stats.name
-        }
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "tasks.apprunner.amazonaws.com"
       }
-    }
-  }
-  instance_configuration {
-    instance_role_arn = aws_iam_role.apprunner_role.arn
-  }
-  depends_on = [aws_iam_role_policy_attachment.apprunner_access_attach]
+    }]
+  })
 }
+
+resource "aws_iam_policy" "apprunner_policy" {
+  name = "roothealth_apprunner_policy"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:Scan",
+          "dynamodb:Query",
+          "dynamodb:GetItem"
+        ]
+        Resource = aws_dynamodb_table.health_stats.arn
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "attach_apprunner" {
+  role       = aws_iam_role.apprunner_role.name
+  policy_arn = aws_iam_policy.apprunner_policy.arn
+}
+
+resource "aws_iam_role" "apprunner_access_role" {
+  name = "roothealth_apprunner_access_role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = { Service = "build.apprunner.amazonaws.com" }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "apprunner_access_attach" {
+  role       = aws_iam_role.apprunner_access_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess"
+}
+
+ resource "aws_apprunner_service" "dashboard" {
+   service_name = "roothealth-dashboard"
+
+   source_configuration {
+     authentication_configuration {
+       access_role_arn = aws_iam_role.apprunner_access_role.arn
+     }
+    
+     auto_deployments_enabled = true 
+
+     image_repository {
+       image_identifier      = "${aws_ecr_repository.app_repo.repository_url}:latest"
+       image_repository_type = "ECR"
+      
+       image_configuration {
+         port = "8501"
+         runtime_environment_variables = {
+           DYNAMODB_TABLE = aws_dynamodb_table.health_stats.name
+         }
+       }
+     }
+   }
+   instance_configuration {
+     instance_role_arn = aws_iam_role.apprunner_role.arn
+   }
+   depends_on = [aws_iam_role_policy_attachment.apprunner_access_attach]
+ }
+
+ output "dashboard_url" {
+   value = aws_apprunner_service.dashboard.service_url
+ }
