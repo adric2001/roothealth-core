@@ -23,8 +23,43 @@ st.set_page_config(page_title="RootHealth OS", page_icon="🧬", layout="wide", 
 
 st.markdown("""
 <style>
-    .block-container { padding-top: 1rem; padding-bottom: 5rem; }
-    div.stButton > button { width: 100%; border-radius: 8px; font-weight: bold; }
+    .block-container { padding-top: 2rem; padding-bottom: 5rem; max_width: 1200px; }
+    
+    .metric-card {
+        background-color: #1A1C24;
+        border: 1px solid #2C2F3A;
+        border-radius: 12px;
+        padding: 16px;
+        margin-bottom: 12px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        transition: transform 0.2s;
+    }
+    .metric-card:hover { transform: translateY(-2px); border-color: #4CAF50; }
+    
+    .metric-label { color: #8F9BB3; font-size: 0.85rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
+    .metric-value { color: #FFFFFF; font-size: 1.6rem; font-weight: 700; margin: 4px 0; }
+    .metric-unit { color: #5F6B7C; font-size: 0.9rem; font-weight: 400; margin-left: 4px; }
+    
+    .delta-positive { color: #00E676; font-size: 0.8rem; font-weight: 600; background: rgba(0, 230, 118, 0.1); padding: 2px 6px; border-radius: 4px; }
+    .delta-negative { color: #FF5252; font-size: 0.8rem; font-weight: 600; background: rgba(255, 82, 82, 0.1); padding: 2px 6px; border-radius: 4px; }
+    .delta-neutral { color: #8F9BB3; font-size: 0.8rem; }
+
+    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+    .stTabs [data-baseweb="tab"] {
+        background-color: transparent;
+        border-radius: 4px;
+        color: #8F9BB3;
+        font-weight: 600;
+        padding: 8px 16px;
+    }
+    .stTabs [data-baseweb="tab"][aria-selected="true"] {
+        color: #FFFFFF;
+        background-color: #2C2F3A;
+    }
+
+    @media (max-width: 600px) {
+        .metric-value { font-size: 1.4rem; }
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -34,6 +69,28 @@ supp_table = dynamodb.Table(SUPPLEMENTS_TABLE)
 rel_table = dynamodb.Table(RELATIONSHIPS_TABLE)
 s3 = boto3.client('s3', region_name=REGION)
 bedrock = boto3.client('bedrock-runtime', region_name=REGION)
+
+def render_metric_card(label, value, unit, delta_val, delta_pct, time_str):
+    if delta_val > 0:
+        delta_html = f'<span class="delta-positive">▲ {delta_val:.1f} ({delta_pct:.0f}%)</span> <span class="delta-neutral">in {time_str}</span>'
+    elif delta_val < 0:
+        delta_html = f'<span class="delta-negative">▼ {abs(delta_val):.1f} ({abs(delta_pct):.0f}%)</span> <span class="delta-neutral">in {time_str}</span>'
+    else:
+        delta_html = '<span class="delta-neutral">No change</span>'
+        
+    if delta_val == 0 and time_str == "New":
+        delta_html = '<span class="delta-neutral">✨ First Record</span>'
+
+    html = f"""
+    <div class="metric-card">
+        <div class="metric-label">{label}</div>
+        <div class="metric-value">
+            {value} <span class="metric-unit">{unit}</span>
+        </div>
+        <div>{delta_html}</div>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
 
 def get_time_diff(d1, d2):
     diff = relativedelta(d1, d2)
@@ -51,15 +108,12 @@ def save_user_preferences(metrics_list):
             'upload_timestamp': str(int(time.time()))
         })
         return True
-    except Exception as e:
-        st.error(f"Save failed: {e}")
-        return False
+    except: return False
 
 def get_user_preferences():
     try:
         response = table.get_item(Key={'user_id': st.session_state.username, 'record_id': 'USER_SETTINGS'})
-        if 'Item' in response:
-            return response['Item'].get('favorites', [])
+        if 'Item' in response: return response['Item'].get('favorites', [])
     except: pass
     return ["Testosterone, Total", "Vitamin D", "Ferritin", "Body Weight"]
 
@@ -68,21 +122,14 @@ def save_user_profile(age, height, gender, goal, weight):
         table.put_item(Item={
             'user_id': st.session_state.username,
             'record_id': 'USER_PROFILE', 
-            'age': age,
-            'height': height,
-            'gender': gender,
-            'goal': goal,
-            'weight': weight,
+            'age': age, 'height': height, 'gender': gender, 'goal': goal, 'weight': weight,
             'upload_timestamp': str(int(time.time()))
         })
-        st.success("Profile Saved!")
-    except Exception as e:
-        st.error(f"Error saving profile: {e}")
+        st.success("Saved!")
+    except: st.error("Error saving profile")
 
 def get_user_profile():
-    try:
-        response = table.get_item(Key={'user_id': st.session_state.username, 'record_id': 'USER_PROFILE'})
-        return response.get('Item', {})
+    try: return table.get_item(Key={'user_id': st.session_state.username, 'record_id': 'USER_PROFILE'}).get('Item', {})
     except: return {}
 
 def init_auth(username=None):
@@ -95,45 +142,21 @@ def login_user(username, password):
 
 def register_user(email, password):
     try: u = init_auth(email); u.set_base_attributes(email=email); u.register(email, password); st.success("Check email for code.")
-    except Exception as e: st.error(f"Error: {e}")
+    except: st.error("Registration failed")
 
 def confirm_user(email, code):
     try: u = init_auth(email); u.confirm_sign_up(code, username=email); st.success("Verified!")
-    except Exception as e: st.error(f"Error: {e}")
+    except: st.error("Verification failed")
 
 def run_ai_coach(user_data, user_stack, user_profile):
     csv_data = user_data.to_csv(index=False)
-    stack_text = "\n".join([f"- {s['item_name']} ({s['dosage']} {s['frequency']})" for s in user_stack]) if user_stack else "No supplements."
+    stack_txt = "\n".join([f"- {s['item_name']} ({s['dosage']} {s['frequency']})" for s in user_stack]) if user_stack else "None"
     
-    profile_text = f"""
-    Age: {user_profile.get('age', 'Unknown')}
-    Gender: {user_profile.get('gender', 'Unknown')}
-    Height: {user_profile.get('height', 'Unknown')}
-    Current Weight: {user_profile.get('weight', 'Unknown')}
-    Primary Goal: {user_profile.get('goal', 'Optimization')}
-    """
-
-    prompt = f"""
-    You are a high-performance Biohacking Coach.
+    prof_txt = f"Age: {user_profile.get('age','?')}\nGoal: {user_profile.get('goal','Health')}\nWeight: {user_profile.get('weight','?')}"
     
-    USER PROFILE:
-    {profile_text}
-
-    BLOODWORK HISTORY:
-    {csv_data}
+    prompt = f"Role: Elite Health Coach. Context: {prof_txt}. Labs: {csv_data}. Stack: {stack_txt}. Task: 1. Analysis 2. Stack Audit 3. Protocol. Tone: Direct."
     
-    CURRENT STACK:
-    {stack_text}
-    
-    TASK:
-    1. ANALYZE: Correlate their bloodwork with their specific goal ({user_profile.get('goal')}).
-    2. AUDIT: Is their stack helping or hurting?
-    3. PLAN: Give 3 specific actionable steps (Protocol, Diet, or Training).
-    
-    Tone: Direct, data-driven, no medical disclaimers.
-    """
-    
-    body = json.dumps({"anthropic_version": "bedrock-2023-05-31", "max_tokens": 3000, "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}]})
+    body = json.dumps({"anthropic_version": "bedrock-2023-05-31", "max_tokens": 2500, "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}]})
     try:
         r = bedrock.invoke_model(modelId="anthropic.claude-3-5-sonnet-20240620-v1:0", body=body)
         return json.loads(r['body'].read())['content'][0]['text']
@@ -143,16 +166,16 @@ if 'authenticated' not in st.session_state: st.session_state.authenticated = Fal
 if 'username' not in st.session_state: st.session_state.username = None
 
 if not st.session_state.authenticated:
-    st.title("🧬 RootHealth OS")
+    st.title("🧬 RootHealth")
     t1, t2, t3 = st.tabs(["Log In", "Sign Up", "Verify"])
     with t1:
         e, p = st.text_input("Email"), st.text_input("Password", type="password")
-        if st.button("Log In"):
+        if st.button("Log In"): 
             if login_user(e, p): st.session_state.authenticated = True; st.session_state.username = e; st.rerun()
     with t2:
         ne, np = st.text_input("New Email"), st.text_input("New Password", type="password")
         ic = st.text_input("Invite Code", type="password")
-        if st.button("Create"):
+        if st.button("Join"): 
             if ic == os.environ.get("INVITE_CODE"): register_user(ne, np)
             else: st.error("Invalid Code")
     with t3:
@@ -161,12 +184,17 @@ if not st.session_state.authenticated:
     st.stop()
 
 with st.sidebar:
-    st.title("🧬 RootHealth")
-    st.caption("v2.1.0 Beta")
-    st.markdown("---")
+    st.header("Quick Actions")
+    with st.expander("📝 Log Weight", expanded=True):
+        with st.form("log"):
+            w = st.number_input("Weight (lbs)", step=0.1)
+            if st.form_submit_button("Save"):
+                ts = str(int(time.time()))
+                table.put_item(Item={'user_id': st.session_state.username, 'record_id': f"Weight_{ts}", 'metric': "Body Weight", 'value': str(w), 'unit': 'lbs', 'upload_timestamp': ts})
+                st.success("Saved"); time.sleep(0.5); st.rerun()
     if st.button("Log Out"): st.session_state.authenticated = False; st.rerun()
 
-tabs = st.tabs(["📊 Dashboard", "👤 Profile", "🧠 AI Analysis", "📤 Upload", "💊 Stack", "🤝 Coaching"])
+tabs = st.tabs(["Overview", "Profile", "AI Coach", "Upload", "Stack", "Coaching"])
 
 def get_data(uid):
     try: return [i for i in table.query(KeyConditionExpression=Key('user_id').eq(uid))['Items']]
@@ -174,140 +202,123 @@ def get_data(uid):
 
 raw_data = get_data(st.session_state.username)
 df = pd.DataFrame(raw_data)
+
 if not df.empty:
     df['value'] = pd.to_numeric(df['value'], errors='coerce')
     df['Date'] = pd.to_datetime(pd.to_numeric(df['upload_timestamp'].fillna(0)), unit='s')
     df = df.dropna(subset=['value']).sort_values(by='Date')
 
 with tabs[0]:
-    st.subheader("Overview")
     if df.empty: 
-        st.info("No data yet. Go to Upload tab.")
+        st.info("👋 Welcome! Upload your first lab PDF in the 'Upload' tab.")
     else:
-        available_metrics = sorted(df['metric'].unique().tolist())
-        saved_favorites = get_user_preferences()
-        valid_defaults = [m for m in saved_favorites if m in available_metrics]
+        all_metrics = sorted(df['metric'].unique().tolist())
+        saved_faves = get_user_preferences()
+        current_faves = [m for m in saved_faves if m in all_metrics]
         
-        with st.expander("⚙️ Configure Dashboard Widgets", expanded=False):
-            selected_kpis = st.multiselect("Select Key Biomarkers:", options=available_metrics, default=valid_defaults)
-            if st.button("Save Layout"):
-                if save_user_preferences(selected_kpis): st.success("Saved!"); time.sleep(0.5); st.rerun()
-        
-        if selected_kpis:
-            cols = st.columns(4)
-            for i, metric in enumerate(selected_kpis):
+        c1, c2 = st.columns([3, 1])
+        c1.subheader("Dashboard")
+        with c2.popover("⚙️ Customize"):
+            new_faves = st.multiselect("Visible Metrics", all_metrics, default=current_faves)
+            if st.button("Save View"):
+                save_user_preferences(new_faves); st.rerun()
+
+        if not current_faves:
+            st.warning("No metrics selected. Use the ⚙️ button to add some.")
+        else:
+            cols = st.columns(3)
+            for i, metric in enumerate(current_faves):
                 m_df = df[df['metric'] == metric].sort_values(by='Date')
                 if m_df.empty: continue
-                curr_row = m_df.iloc[-1]
-                curr_val, curr_unit = curr_row['value'], curr_row['unit']
                 
+                curr = m_df.iloc[-1]
+                val, unit = curr['value'], curr['unit']
+                
+                delta, pct, t_str = 0, 0, "New"
                 if len(m_df) > 1:
-                    prev_row = m_df.iloc[-2]
-                    prev_val = prev_row['value']
-                    diff = curr_val - prev_val
-                    pct = (diff / prev_val) * 100
-                    time_str = get_time_diff(curr_row['Date'], prev_row['Date'])
-                    display_val = f"{prev_val} → {curr_val}"
-                    delta_str = f"{diff:+.1f} ({pct:+.1f}%) in {time_str}"
-                else:
-                    display_val = f"{curr_val}"
-                    delta_str = "First Record"
+                    prev = m_df.iloc[-2]
+                    delta = val - prev['value']
+                    pct = (delta / prev['value']) * 100 if prev['value'] != 0 else 0
+                    t_str = get_time_diff(curr['Date'], prev['Date'])
 
-                with cols[i % 4]: st.metric(label=metric, value=display_val + f" {curr_unit}", delta=delta_str)
+                with cols[i % 3]:
+                    render_metric_card(metric, val, unit, delta, pct, t_str)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.subheader("Trends")
+        sel = st.selectbox("", all_metrics, label_visibility="collapsed")
         
-        st.markdown("---")
-        st.subheader("Deep Dive")
-        sel = st.selectbox("Select Metric", available_metrics)
-        chart_df = df[df['metric']==sel]
-        fig = px.line(chart_df, x="Date", y="value", markers=True, title=f"{sel} History")
+        chart_data = df[df['metric'] == sel]
+        fig = px.line(chart_data, x="Date", y="value", markers=True, title=None)
+        fig.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font_color="#8F9BB3", 
+            xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor="#2C2F3A"),
+            margin=dict(l=0, r=0, t=10, b=0),
+            height=300
+        )
+        fig.update_traces(line_color="#4CAF50", line_width=3, marker_size=8)
         st.plotly_chart(fig, use_container_width=True)
 
+    with st.expander("🔍 Debug Raw Data"):
+        st.dataframe(df)
+
 with tabs[1]:
-    st.header("User Profile")
-    st.write("The AI Coach uses this data to customize your protocol.")
-    
-    current_profile = get_user_profile()
-    
-    with st.form("profile_form"):
+    st.subheader("Bio Profile")
+    prof = get_user_profile()
+    with st.form("prof"):
         c1, c2 = st.columns(2)
-        with c1:
-            p_age = st.number_input("Age", value=int(current_profile.get('age', 25)), min_value=18, max_value=100)
-            p_weight = st.number_input("Current Weight (lbs)", value=float(current_profile.get('weight', 180.0)))
-            p_gender = st.selectbox("Gender", ["Male", "Female"], index=0 if current_profile.get('gender') == "Male" else 1)
-        with c2:
-            p_height = st.text_input("Height (e.g. 5'10)", value=current_profile.get('height', ""))
-            p_goal = st.selectbox("Primary Goal", 
-                                ["Optimization / Longevity", 
-                                 "Muscle Gain / Hypertrophy", 
-                                 "Fat Loss", 
-                                 "Cognitive Performance", 
-                                 "Libido / Hormone Health"],
-                                index=0)
-            
-        if st.form_submit_button("Save Profile"):
-            save_user_profile(p_age, p_height, p_gender, p_goal, p_weight)
-            ts = str(int(time.time()))
-            table.put_item(Item={'user_id': st.session_state.username, 'record_id': f"Weight_{ts}", 'metric': "Body Weight", 'value': str(p_weight), 'unit': 'lbs', 'upload_timestamp': ts, 'source_file': 'Profile_Update'})
-            time.sleep(0.5)
+        age = c1.number_input("Age", value=int(prof.get('age', 25)))
+        h = c2.text_input("Height", value=prof.get('height', ""))
+        g = c1.selectbox("Gender", ["Male", "Female"], index=0)
+        goal = c2.selectbox("Goal", ["Longevity", "Hypertrophy", "Fat Loss", "Energy"])
+        if st.form_submit_button("Save Changes"):
+            save_user_profile(age, h, g, goal, prof.get('weight', 0))
             st.rerun()
 
 with tabs[2]:
-    st.header("🧠 Intelligence Center")
-    if df.empty: st.warning("Upload data first.")
-    else:
-        c1, c2 = st.columns([1, 1])
-        with c1:
-            st.subheader("Correlation Engine")
-            all_m = df['metric'].unique()
-            m1 = st.selectbox("Left Axis", all_m, index=0)
-            m2 = st.selectbox("Right Axis", all_m, index=1 if len(all_m)>1 else 0)
-            d1 = df[df['metric'] == m1].sort_values('Date')
-            d2 = df[df['metric'] == m2].sort_values('Date')
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=d1['Date'], y=d1['value'], name=m1, mode='lines+markers'))
-            fig.add_trace(go.Scatter(x=d2['Date'], y=d2['value'], name=m2, mode='lines+markers', yaxis='y2'))
-            fig.update_layout(title=f"{m1} vs {m2}", yaxis=dict(title=m1), yaxis2=dict(title=m2, overlaying='y', side='right'), legend=dict(orientation="h", y=1.1))
-            st.plotly_chart(fig, use_container_width=True)
-
-        with c2:
-            st.subheader("AI Protocol Coach")
-            st.info("Uses your Profile, Labs, and Stack for analysis.")
-            if st.button("⚡ Generate Full Audit", type="primary"):
-                with st.spinner("Analyzing biochemistry & goals..."):
-                    try: stack = supp_table.query(KeyConditionExpression=Key('user_id').eq(st.session_state.username)).get('Items', [])
-                    except: stack = []
-                    
-                    profile = get_user_profile()
-                    if not profile: st.warning("Tip: Fill out the 'Profile' tab for better results.")
-                    
-                    advice = run_ai_coach(df, stack, profile)
-                    st.markdown(advice)
+    st.subheader("AI Analysis")
+    if st.button("⚡ Generate Report", type="primary"):
+        with st.spinner("Analyzing..."):
+            try: stack = supp_table.query(KeyConditionExpression=Key('user_id').eq(st.session_state.username)).get('Items', [])
+            except: stack = []
+            res = run_ai_coach(df, stack, get_user_profile())
+            st.markdown(res)
 
 with tabs[3]:
-    st.header("Upload")
+    st.subheader("Upload Labs")
     files = st.file_uploader("PDF/CSV", accept_multiple_files=True)
     if files and st.button("Upload"):
         for f in files: s3.put_object(Bucket=BUCKET_NAME, Key=f"uploads/{st.session_state.username}/{f.name}", Body=f.getvalue())
-        st.success("Uploaded. Processing...")
+        st.success("Uploaded! Processing in background...")
 
 with tabs[4]:
-    st.header("Stack")
+    st.subheader("Protocol")
     c1, c2 = st.columns([2,1])
     with c2:
-        with st.form("add"):
+        with st.form("add_supp"):
             n = st.text_input("Name"); d = st.text_input("Dose"); f = st.selectbox("Freq", ["Daily", "AM/PM", "Weekly"])
             if st.form_submit_button("Add"): supp_table.put_item(Item={'user_id': st.session_state.username, 'item_name': n, 'dosage': d, 'frequency': f}); st.rerun()
     with c1:
         try: 
             items = supp_table.query(KeyConditionExpression=Key('user_id').eq(st.session_state.username)).get('Items', [])
-            if items: st.dataframe(pd.DataFrame(items)[['item_name', 'dosage', 'frequency']], use_container_width=True)
+            if items: st.dataframe(pd.DataFrame(items)[['item_name', 'dosage', 'frequency']], use_container_width=True, hide_index=True)
         except: pass
 
 with tabs[5]:
-    st.header("Coaching")
-    role = st.radio("Mode", ["Client", "Coach"])
+    st.subheader("Coach Portal")
+    role = st.radio("I am a:", ["Client", "Coach"], horizontal=True)
     if role == "Client":
-        coach = st.text_input("Coach Email")
-        if st.button("Link"): rel_table.put_item(Item={'coach_id': coach, 'client_id': st.session_state.username}); st.success("Linked!")
+        coach_em = st.text_input("Coach Email")
+        if st.button("Grant Access"): rel_table.put_item(Item={'coach_id': coach_em.lower(), 'client_id': st.session_state.username}); st.success("Linked!")
     else:
-        st.info("Coach Dashboard active.")
+        st.info("Coach Dashboard")
+        try:
+            clients = rel_table.query(KeyConditionExpression=Key('coach_id').eq(st.session_state.username))['Items']
+            if not clients: st.warning("No clients linked.")
+            else:
+                c_sel = st.selectbox("Select Client", [c['client_id'] for c in clients])
+                if c_sel:
+                    c_data = get_data(c_sel)
+                    st.dataframe(pd.DataFrame(c_data))
+        except: st.error("Error loading clients")
