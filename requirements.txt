@@ -4,3 +4,4 @@ plotly
 streamlit
 watchdog
 pycognito
+pypdf
