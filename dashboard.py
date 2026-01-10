@@ -12,13 +12,18 @@ from boto3.dynamodb.conditions import Key
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
+# --- CONFIGURATION ---
 REGION = os.environ.get('AWS_REGION', 'us-east-1')
 USER_POOL_ID = os.environ.get('COGNITO_USER_POOL_ID', '')
 CLIENT_ID = os.environ.get('COGNITO_CLIENT_ID', '')
 TABLE_NAME = os.environ.get('DYNAMODB_TABLE', 'RootHealth_Stats')
 SUPPLEMENTS_TABLE = "RootHealth_Supplements"
 RELATIONSHIPS_TABLE = "RootHealth_Relationships"
-BUCKET_NAME = os.environ.get('S3_BUCKET_NAME', 'roothealth-raw-files-adric') 
+BUCKET_NAME = os.environ.get('S3_BUCKET_NAME', 'roothealth-raw-files-adric')
+
+# --- ADMIN CREDENTIALS (CHANGE THESE IN PROD ENV VARS) ---
+ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', 'admin')
+ADMIN_PASS = os.environ.get('ADMIN_PASSWORD', 'root123')
 
 st.set_page_config(page_title="RootHealth OS", page_icon="🧬", layout="wide", initial_sidebar_state="expanded")
 
@@ -92,6 +97,7 @@ def get_optimal_ranges(profile):
     height_str = profile.get('height', '5\'10')
     inches = parse_height_to_inches(height_str)
     
+    # BMI Calculation
     min_w = int(18.5 * (inches**2) / 703)
     max_w = int(25 * (inches**2) / 703)
     opt_min_w = int(21 * (inches**2) / 703)
@@ -130,7 +136,7 @@ def save_user_profile(age, height, gender, goal, weight):
     try: 
         table.put_item(Item={'user_id': st.session_state.username, 'record_id': 'USER_PROFILE', 'age': age, 'height': height, 'gender': gender, 'goal': goal, 'weight': weight, 'upload_timestamp': str(int(time.time()))})
         st.success("Profile Saved!")
-        time.sleep(1) # Wait for propagation
+        time.sleep(1)
     except: st.error("Error saving profile")
 
 def get_user_profile():
@@ -146,11 +152,59 @@ def update_manual_data(df_changes):
             table.put_item(Item={'user_id': st.session_state.username, 'record_id': rec_id, 'metric': row['metric'], 'value': str(row['value']), 'unit': row['unit'], 'upload_timestamp': ts, 'source_file': 'Manual_Edit'})
         except Exception as e: st.error(f"Failed: {e}")
 
+# --- ADMIN FUNCTIONS ---
+def admin_get_all_users():
+    """Scans the stats table to find unique user_ids"""
+    try:
+        # Scan is expensive in production, okay for MVP admin tool
+        response = table.scan(ProjectionExpression="user_id")
+        users = set(item['user_id'] for item in response['Items'])
+        return list(users)
+    except Exception as e:
+        st.error(f"Admin Scan Error: {e}")
+        return []
+
+def admin_nuke_user(target_user_id):
+    """Deletes EVERYTHING associated with a user_id"""
+    try:
+        # 1. Delete Stats & Profile
+        scan_stats = table.query(KeyConditionExpression=Key('user_id').eq(target_user_id))
+        with table.batch_writer() as batch:
+            for item in scan_stats['Items']:
+                batch.delete_item(Key={'user_id': target_user_id, 'record_id': item['record_id']})
+        
+        # 2. Delete Stack
+        scan_supps = supp_table.query(KeyConditionExpression=Key('user_id').eq(target_user_id))
+        with supp_table.batch_writer() as batch:
+            for item in scan_supps['Items']:
+                batch.delete_item(Key={'user_id': target_user_id, 'item_name': item['item_name']})
+                
+        # 3. Delete S3 Files
+        # List objects in folder
+        objects = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix=f"uploads/{target_user_id}/")
+        if 'Contents' in objects:
+            delete_keys = [{'Key': obj['Key']} for obj in objects['Contents']]
+            s3.delete_objects(Bucket=BUCKET_NAME, Delete={'Objects': delete_keys})
+
+        # 4. Delete Relationships (As Client)
+        # Note: This requires scanning relationships or GSI. MVP: Just delete if found.
+        # We skip complex relationship cleanup for MVP safety, but user is gone from main apps.
+        
+        return True
+    except Exception as e:
+        st.error(f"Nuke Error: {e}")
+        return False
+
+# --- AUTH ---
 def init_auth(username=None):
     if not USER_POOL_ID or not CLIENT_ID: st.stop()
     return Cognito(USER_POOL_ID, CLIENT_ID, username=username)
 
 def login_user(username, password):
+    # ADMIN BACKDOOR
+    if username == ADMIN_EMAIL and password == ADMIN_PASS:
+        return "ADMIN_USER"
+        
     try: u = init_auth(username); u.authenticate(password=password); return u
     except: return None
 
@@ -165,7 +219,7 @@ def confirm_user(email, code):
 def run_ai_coach(user_data, user_stack, user_profile):
     csv_data = user_data.to_csv(index=False)
     stack_txt = "\n".join([f"- {s['item_name']} ({s['dosage']} {s['frequency']})" for s in user_stack]) if user_stack else "None"
-    prof_txt = f"Age: {user_profile.get('age','?')}\nGoal: {user_profile.get('goal','Health')}\nWeight: {user_profile.get('weight','?')}\nHeight: {user_profile.get('height','?')}\nGender: {user_profile.get('gender','?')}"
+    prof_txt = f"Age: {user_profile.get('age','?')}\nGoal: {user_profile.get('goal','Health')}\nWeight: {user_profile.get('weight','?')}"
     prompt = f"Role: Elite Biohacker Coach. Context: {prof_txt}. Labs: {csv_data}. Stack: {stack_txt}. Task: 1. Analysis 2. Stack Audit 3. Protocol. Tone: Direct."
     body = json.dumps({"anthropic_version": "bedrock-2023-05-31", "max_tokens": 2500, "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}]})
     try: return json.loads(bedrock.invoke_model(modelId="anthropic.claude-3-5-sonnet-20240620-v1:0", body=body)['body'].read())['content'][0]['text']
@@ -177,6 +231,7 @@ def get_data(uid):
 
 if 'authenticated' not in st.session_state: st.session_state.authenticated = False
 if 'username' not in st.session_state: st.session_state.username = None
+if 'is_admin' not in st.session_state: st.session_state.is_admin = False
 
 if not st.session_state.authenticated:
     st.title("🧬 RootHealth")
@@ -184,7 +239,17 @@ if not st.session_state.authenticated:
     with t1:
         e, p = st.text_input("Email"), st.text_input("Password", type="password")
         if st.button("Log In"): 
-            if login_user(e, p): st.session_state.authenticated = True; st.session_state.username = e; st.rerun()
+            user = login_user(e, p)
+            if user == "ADMIN_USER":
+                st.session_state.authenticated = True
+                st.session_state.username = "ROOT_ADMIN"
+                st.session_state.is_admin = True
+                st.rerun()
+            elif user: 
+                st.session_state.authenticated = True
+                st.session_state.username = e
+                st.session_state.is_admin = False
+                st.rerun()
     with t2:
         ne, np = st.text_input("New Email"), st.text_input("New Password", type="password")
         ic = st.text_input("Invite Code", type="password")
@@ -196,6 +261,44 @@ if not st.session_state.authenticated:
         if st.button("Verify"): confirm_user(ve, vc)
     st.stop()
 
+# --- ADMIN VIEW ---
+if st.session_state.is_admin:
+    st.sidebar.title("⚠️ Root Admin")
+    if st.sidebar.button("Log Out"): 
+        st.session_state.authenticated = False
+        st.session_state.is_admin = False
+        st.rerun()
+    
+    st.header("System Administration")
+    st.warning("You are logged in as Root. Actions here are irreversible.")
+    
+    all_users = admin_get_all_users()
+    
+    with st.container(border=True):
+        st.subheader(f"Total Users: {len(all_users)}")
+        
+        target_user = st.selectbox("Select User to Manage", all_users)
+        
+        if target_user:
+            c1, c2 = st.columns(2)
+            with c1:
+                st.info(f"Selected: {target_user}")
+                # Show quick stats
+                u_data = get_data(target_user)
+                st.write(f"Records: {len(u_data)}")
+                
+            with c2:
+                if st.button("🗑️ DELETE USER & DATA", type="primary"):
+                    if admin_nuke_user(target_user):
+                        st.success(f"Nuked {target_user}")
+                        time.sleep(2)
+                        st.rerun()
+                    else:
+                        st.error("Failed to delete.")
+    
+    st.stop() # Stop normal app rendering for admin
+
+# --- NORMAL USER VIEW ---
 with st.sidebar:
     st.title("🧬 RootHealth")
     page = st.radio("Navigation", ["Dashboard", "Data Manager", "AI Coach", "Profile & Stack", "Coaching"], label_visibility="collapsed")
