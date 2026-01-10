@@ -3,6 +3,7 @@ import boto3
 import pandas as pd
 import plotly.express as px
 import os
+import time 
 from pycognito import Cognito
 from boto3.dynamodb.conditions import Key
 
