@@ -2,7 +2,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 4.16"
+      version = "~> 5.0"
     }
     archive = {
       source  = "hashicorp/archive"
@@ -17,7 +17,6 @@ provider "aws" {
 
 resource "aws_cognito_user_pool" "users" {
   name = "roothealth-users"
-
   password_policy {
     minimum_length    = 8
     require_lowercase = true
@@ -25,7 +24,6 @@ resource "aws_cognito_user_pool" "users" {
     require_symbols   = false
     require_uppercase = true
   }
-
   username_attributes = ["email"]
   auto_verified_attributes = ["email"]
 }
@@ -33,13 +31,8 @@ resource "aws_cognito_user_pool" "users" {
 resource "aws_cognito_user_pool_client" "client" {
   name = "roothealth-app-client"
   user_pool_id = aws_cognito_user_pool.users.id
-  
   generate_secret = false 
-  explicit_auth_flows = [
-    "ALLOW_USER_PASSWORD_AUTH", 
-    "ALLOW_REFRESH_TOKEN_AUTH",
-    "ALLOW_USER_SRP_AUTH"
-  ]
+  explicit_auth_flows = ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH", "ALLOW_USER_SRP_AUTH"]
 }
 
 resource "aws_s3_bucket" "raw_data" {
@@ -60,12 +53,10 @@ resource "aws_dynamodb_table" "health_stats" {
   billing_mode   = "PAY_PER_REQUEST"
   hash_key       = "user_id"    
   range_key      = "record_id"  
-
   attribute {
     name = "user_id"
     type = "S"
   }
-
   attribute {
     name = "record_id"
     type = "S"
@@ -77,12 +68,10 @@ resource "aws_dynamodb_table" "supplements" {
   billing_mode   = "PAY_PER_REQUEST"
   hash_key       = "user_id"
   range_key      = "item_name" 
-
   attribute {
     name = "user_id"
     type = "S"
   }
-
   attribute {
     name = "item_name"
     type = "S"
@@ -103,7 +92,6 @@ resource "aws_iam_role" "ingestion_role" {
 
 resource "aws_iam_policy" "ingestion_policy" {
   name = "roothealth_ingestion_policy"
-
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -119,12 +107,8 @@ resource "aws_iam_policy" "ingestion_policy" {
       },
       {
         Effect = "Allow"
-        Action = [
-          "textract:AnalyzeDocument",
-          "textract:StartDocumentAnalysis", 
-          "textract:GetDocumentAnalysis"
-        ]
-        Resource = "*"
+        Action = ["bedrock:InvokeModel"]
+        Resource = "*" 
       },
       {
         Effect = "Allow"
@@ -151,7 +135,7 @@ resource "aws_lambda_function" "ingestor" {
   function_name = "RootHealthIngestor"
   role          = aws_iam_role.ingestion_role.arn
   handler       = "lambda_function.lambda_handler"
-  runtime       = "python3.9"
+  runtime       = "python3.11" 
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
   timeout = 60
 
@@ -225,17 +209,13 @@ resource "aws_iam_role_policy_attachment" "eb_ecr_read" {
 resource "aws_iam_role_policy" "eb_app_permissions" {
   name = "roothealth_eb_custom_policy"
   role = aws_iam_role.eb_instance_role.id
-
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
         Effect = "Allow"
         Action = ["dynamodb:Scan", "dynamodb:Query", "dynamodb:GetItem", "dynamodb:PutItem"]
-        Resource = [
-          aws_dynamodb_table.health_stats.arn,
-          aws_dynamodb_table.supplements.arn
-        ]
+        Resource = [aws_dynamodb_table.health_stats.arn, aws_dynamodb_table.supplements.arn]
       },
       {
         Effect = "Allow"
@@ -249,24 +229,22 @@ resource "aws_iam_role_policy" "eb_app_permissions" {
 resource "aws_elastic_beanstalk_environment" "env" {
   name                = "RoothealthCore-env"
   application         = aws_elastic_beanstalk_application.app.name
+  
   solution_stack_name = "64bit Amazon Linux 2023 v4.9.0 running Docker"
   
   lifecycle {
     ignore_changes = [version_label]
   }
-
   setting {
     namespace = "aws:autoscaling:launchconfiguration"
     name      = "IamInstanceProfile"
     value     = aws_iam_instance_profile.eb_instance_profile.name
   }
-
   setting {
     namespace = "aws:elasticbeanstalk:environment"
     name      = "EnvironmentType"
-    value     = "SingleInstance" # Cheaper for dev/testing
+    value     = "SingleInstance" 
   }
-
   setting {
     namespace = "aws:elasticbeanstalk:application:environment"
     name      = "DYNAMODB_TABLE"

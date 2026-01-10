@@ -1,157 +1,159 @@
 import boto3
 import os
-import time
+import json
 import urllib.parse
+import time
+import base64
 import re
 from datetime import datetime
 
 s3 = boto3.client('s3')
-textract = boto3.client('textract')
+bedrock = boto3.client('bedrock-runtime', region_name='us-east-1')
 dynamodb = boto3.resource('dynamodb')
 
 TABLE_NAME = os.environ['DYNAMODB_TABLE']
 
-def parse_date(date_text):
-    if not date_text: return None
-    formats = ["%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%d-%b-%Y"]
-    clean_text = re.split(r'\s+|/', date_text)[0]
-    match = re.search(r'(\d{1,2}/\d{1,2}/\d{2,4})', date_text)
-    if match: clean_text = match.group(1)
-    for fmt in formats:
-        try: return str(int(datetime.strptime(clean_text, fmt).timestamp()))
-        except ValueError: continue
-    return None
-
-def clean_value(val):
-    if not val: return None
-    if val.upper() in ["FRE", "KS", "EZ", "Z3E", "MDF", "SEE NOTE", "PAGE", "OF"]: return None
-    match = re.search(r'([<>]?)\s*(\d+(\.\d+)?)', val)
-    if match: return match.group(2)
-    return None
-
-def normalize_metric_name(name):
-    if not name: return ""
-    name = name.upper().strip()
-    name = re.sub(r'\s+', ' ', name)
-    name = name.replace(',', ', ')
-    name = name.replace(' ,', ',')
-    name = name.replace(',  ', ', ')
+def analyze_document_with_claude(bucket, key):
+    print(f"🧠 Processing {key} with Claude 3 Haiku...")
     
-    if "TESTOSTERONE" in name and "TOTAL" in name:
-        if "FREE" not in name or "MS TESTOSTERONE" in name: 
-             return "TESTOSTERONE, TOTAL"
-             
-    if "ESTRADIOL" in name and "ULTRASENSITIVE" in name:
-        return "ESTRADIOL, ULTRASENSITIVE"
+   
+    try:
+        response = s3.get_object(Bucket=bucket, Key=key)
+        file_bytes = response['Body'].read()
+        encoded_pdf = base64.b64encode(file_bytes).decode('utf-8')
+    except Exception as e:
+        print(f"❌ S3 Read Error: {e}")
+        return []
 
-    return name.title()
-
-def process_pdf(bucket, key, user_id, file_key, upload_timestamp, table):
-    start_response = textract.start_document_analysis(
-        DocumentLocation={'S3Object': {'Bucket': bucket, 'Name': key}},
-        FeatureTypes=['TABLES', 'QUERIES'],
-        QueriesConfig={'Queries': [{'Text': "Date Collected?", 'Alias': "DATE_COLLECTED"}]}
-    )
-    job_id = start_response['JobId']
+   
+    prompt = """
+    You are a medical data parser. Look at the attached blood work PDF.
     
-    status = "IN_PROGRESS"
-    while status == "IN_PROGRESS":
-        time.sleep(2)
-        response = textract.get_document_analysis(JobId=job_id)
-        status = response['JobStatus']
-        
-    if status != "SUCCEEDED":
-        return
-
-    all_blocks = []
-    next_token = None
-    while True:
-        params = {'JobId': job_id}
-        if next_token: params['NextToken'] = next_token
-        response = textract.get_document_analysis(**params)
-        all_blocks.extend(response['Blocks'])
-        next_token = response.get('NextToken')
-        if not next_token: break
-            
-    collection_date = upload_timestamp 
-    text_map = {b['Id']: b['Text'] for b in all_blocks if 'Text' in b}
+    TASK:
+    Extract all blood test results into a clean JSON list.
     
-    for block in all_blocks:
-        if block['BlockType'] == 'QUERY' and block['Query']['Alias'] == 'DATE_COLLECTED':
-            for rel in block.get('Relationships', []):
-                if rel['Type'] == 'ANSWER':
-                    ans_id = rel['Ids'][0]
-                    raw_date = text_map.get(ans_id, "")
-                    parsed = parse_date(raw_date)
-                    if parsed: collection_date = parsed
+    RULES:
+    1. IGNORE: Reference ranges, notes, "page x of y", doctor names, addresses.
+    2. TARGET: Only the Metric Name, the numeric Value, and the Unit.
+    3. DATE: Find the "Collection Date" or "Service Date". If not found, use "UNKNOWN".
+    4. NORMALIZE NAMES (Strictly follow this):
+       - "Testosterone, Free and Total" -> "Testosterone, Total" (if it's the total value)
+       - "Testosterone, Free" -> "Testosterone, Free"
+       - "Estradiol, Ultrasensitive, LC/MS" -> "Estradiol, Ultrasensitive"
+       - "Vitamin D, 25-Hydroxy" -> "Vitamin D"
+       - Remove "MS", "LC/MS", "Dialysis" unless it distinguishes the test.
+    
+    OUTPUT FORMAT:
+    Return ONLY a JSON list. No markdown formatting, no conversational text.
+    [
+      { "metric": "Testosterone, Total", "value": 750, "unit": "ng/dL", "date": "2024-01-01" },
+      { "metric": "Estradiol", "value": 25, "unit": "pg/mL", "date": "2024-01-01" }
+    ]
+    """
 
-    with table.batch_writer() as batch:
-        for block in all_blocks:
-            if block['BlockType'] == 'TABLE':
-                cell_map = {} 
-                if 'Relationships' in block:
-                    for rel in block['Relationships']:
-                        if rel['Type'] == 'CHILD':
-                            for child_id in rel['Ids']:
-                                cell = next((b for b in all_blocks if b['Id'] == child_id), None)
-                                if cell and cell['BlockType'] == 'CELL':
-                                    row = cell['RowIndex']
-                                    col = cell['ColumnIndex']
-                                    txt = ""
-                                    if 'Relationships' in cell:
-                                        for cr in cell['Relationships']:
-                                            if cr['Type'] == 'CHILD':
-                                                for wid in cr['Ids']:
-                                                    txt += text_map.get(wid, "") + " "
-                                    cell_map[(row, col)] = txt.strip()
-                
-                max_row = max([r for r, c in cell_map.keys()] or [0])
-                for r in range(1, max_row + 1):
-                    raw_name = cell_map.get((r, 1), "")
-                    
-                    if len(raw_name) < 3: continue
-                    if re.match(r'^[\d\.\-]+$', raw_name.replace(' ', '')): continue
-                    
-                    bad_phrases = [
-                        "HIGHER RELATIVE", "CONSIDER EXCLUDE", "FOR ADDITIONAL INFORMATION", 
-                        "PURPOSES ONLY", "Z SCORE", "REFERENCE RANGE", "PAGE OF", 
-                        "LAB REF", "COLLECTED", "RECEIVED", "REPORTED", "SEE NOTE",
-                        "PLEASE REFER TO", "INTERPRETATION"
-                    ]
-                    if any(phrase in raw_name.upper() for phrase in bad_phrases): continue
-                    if len(raw_name) > 60: continue
-
-                    test_name = normalize_metric_name(raw_name)
-
-                    raw_val = clean_value(cell_map.get((r, 2), ""))
-                    if not raw_val:
-                        raw_val = clean_value(cell_map.get((r, 3), ""))
-                        
-                    if raw_val:
-                        item_id = f"{test_name}_{file_key}".replace(" ", "_")
-                        item = {
-                            'user_id': user_id,
-                            'record_id': item_id, 
-                            'metric': test_name,
-                            'value': raw_val,
-                            'unit': 'extracted',
-                            'source_file': file_key,
-                            'upload_timestamp': collection_date
+   
+    body = json.dumps({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 4096,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": encoded_pdf
                         }
-                        batch.put_item(Item=item)
+                    },
+                    {
+                        "type": "text",
+                        "text": prompt
+                    }
+                ]
+            }
+        ]
+    })
+
+ 
+    try:
+        response = bedrock.invoke_model(
+            modelId="anthropic.claude-3-haiku-20240307-v1:0",
+            body=body
+        )
+        response_body = json.loads(response.get("body").read())
+        result_text = response_body['content'][0]['text']
+        
+       
+        start = result_text.find('[')
+        end = result_text.rfind(']') + 1
+        if start != -1 and end != -1:
+            return json.loads(result_text[start:end])
+        else:
+            print("❌ No JSON found in response")
+            return []
+            
+    except Exception as e:
+        print(f"❌ Bedrock Error: {e}")
+        return []
 
 def lambda_handler(event, context):
     try:
         record = event['Records'][0]
-        bucket_name = record['s3']['bucket']['name']
-        file_key = urllib.parse.unquote_plus(record['s3']['object']['key'])
+        bucket = record['s3']['bucket']['name']
+        key = urllib.parse.unquote_plus(record['s3']['object']['key'])
         
-        if file_key.endswith('.pdf'):
-            table = dynamodb.Table(TABLE_NAME)
-            parts = file_key.split('/')
-            user_id = parts[1] if len(parts) > 1 else "unknown"
-            process_pdf(bucket_name, file_key, user_id, file_key, str(int(time.time())), table)
+        if not key.endswith('.pdf'):
+            return {"statusCode": 200, "body": "Skipped non-PDF"}
+
+       
+        results = analyze_document_with_claude(bucket, key)
+        
+        
+        table = dynamodb.Table(TABLE_NAME)
+        parts = key.split('/')
+        user_id = parts[1] if len(parts) > 1 else "unknown"
+        upload_time = str(int(time.time()))
+
+        with table.batch_writer() as batch:
+            for item in results:
+             
+                date_ts = upload_time
+                if item.get('date') and item['date'] != "UNKNOWN":
+                    try:
+                       
+                        for fmt in ["%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%d-%b-%Y"]:
+                            try:
+                                dt = datetime.strptime(item['date'], fmt)
+                                date_ts = str(int(dt.timestamp()))
+                                break
+                            except:
+                                continue
+                    except:
+                        pass 
+
             
+                val_str = str(item['value'])
+                
+                clean_val = re.sub(r'[^\d\.]', '', val_str) if any(c.isdigit() for c in val_str) else val_str
+
+                record_id = f"{item['metric'].replace(' ', '_')}_{key}"
+                
+                print(f"   -> Saving {item['metric']}: {clean_val}")
+                
+                batch.put_item(Item={
+                    'user_id': user_id,
+                    'record_id': record_id,
+                    'metric': item['metric'],
+                    'value': clean_val,
+                    'original_value': val_str,
+                    'unit': item.get('unit', ''),
+                    'source_file': key,
+                    'upload_timestamp': date_ts
+                })
+
         return {"statusCode": 200, "body": "Success"}
     except Exception as e:
+        print(f"Error: {e}")
         raise e
