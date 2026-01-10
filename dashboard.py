@@ -54,7 +54,7 @@ if 'username' not in st.session_state:
     st.session_state.username = None
 
 if not st.session_state.authenticated:
-    st.title("🧬 RootHealth Access")
+    st.title("🧬 RootHealth Access (Beta)")
     
     tab1, tab2, tab3 = st.tabs(["Log In", "Sign Up", "Verify Account"])
     
