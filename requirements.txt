@@ -2,3 +2,5 @@ boto3
 pandas
 plotly
 streamlit
+watchdog
+pycognito

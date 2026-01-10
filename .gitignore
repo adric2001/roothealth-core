@@ -8,3 +8,17 @@ __pycache__/
 *.pyc
 .DS_Store
 .env
+.github/
+.vscode/
+roothealth-dev.tar
+dockerignore
+docker-compose.override.yml
+roothealth-core/.pytest_cache/
+roothealth-core/.mypy_cache/
+roothealth-core/.coverage
+roothealth-core/htmlcov/
+roothealth-core/.tox/
+roothealth-core/.env
+roothealth-core/.idea/
+roothealth-core/.vscode/
+roothealth-core/.ruff_cache/

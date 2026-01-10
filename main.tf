@@ -15,14 +15,40 @@ provider "aws" {
   region = "us-east-1"
 }
 
+resource "aws_cognito_user_pool" "users" {
+  name = "roothealth-users"
+
+  password_policy {
+    minimum_length    = 8
+    require_lowercase = true
+    require_numbers   = true
+    require_symbols   = false
+    require_uppercase = true
+  }
+
+  username_attributes = ["email"]
+  auto_verified_attributes = ["email"]
+}
+
+resource "aws_cognito_user_pool_client" "client" {
+  name = "roothealth-app-client"
+  user_pool_id = aws_cognito_user_pool.users.id
+  
+  generate_secret = false 
+  explicit_auth_flows = [
+    "ALLOW_USER_PASSWORD_AUTH", 
+    "ALLOW_REFRESH_TOKEN_AUTH",
+    "ALLOW_USER_SRP_AUTH"
+  ]
+}
+
 resource "aws_s3_bucket" "raw_data" {
   bucket = "roothealth-raw-files-adric"
-  force_destroy = true # Allows deleting bucket even if it has files (for dev)
+  force_destroy = true 
 }
 
 resource "aws_s3_bucket_public_access_block" "raw_data_block" {
   bucket = aws_s3_bucket.raw_data.id
-
   block_public_acls       = true
   block_public_policy     = true
   ignore_public_acls      = true
@@ -32,8 +58,8 @@ resource "aws_s3_bucket_public_access_block" "raw_data_block" {
 resource "aws_dynamodb_table" "health_stats" {
   name           = "RootHealth_Stats"
   billing_mode   = "PAY_PER_REQUEST"
-  hash_key       = "user_id"    # Partition Key (Who is this?)
-  range_key      = "record_id"  # Sort Key (What metric & when?)
+  hash_key       = "user_id"    
+  range_key      = "record_id"  
 
   attribute {
     name = "user_id"
@@ -44,27 +70,31 @@ resource "aws_dynamodb_table" "health_stats" {
     name = "record_id"
     type = "S"
   }
+}
 
-  tags = {
-    Project = "RootHealth"
+resource "aws_dynamodb_table" "supplements" {
+  name           = "RootHealth_Supplements"
+  billing_mode   = "PAY_PER_REQUEST"
+  hash_key       = "user_id"
+  range_key      = "item_name" # Sort by drug/supplement name
+
+  attribute {
+    name = "user_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "item_name"
+    type = "S"
   }
 }
 
-output "s3_bucket_name" {
-  value = aws_s3_bucket.raw_data.id
-}
-
-output "dynamodb_table_name" {
-  value = aws_dynamodb_table.health_stats.name
-}
-
-output "ecr_url" {
-  value = aws_ecr_repository.app_repo.repository_url
+output "supplements_table_name" {
+  value = aws_dynamodb_table.supplements.name
 }
 
 resource "aws_iam_role" "ingestion_role" {
   name = "roothealth_ingestion_role"
-
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -88,9 +118,26 @@ resource "aws_iam_policy" "ingestion_policy" {
       },
       {
         Effect = "Allow"
-        Action = ["s3:GetObject"]
-        Resource = "${aws_s3_bucket.raw_data.arn}/*"
+        Action = [
+          "s3:GetObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          "${aws_s3_bucket.raw_data.arn}",
+          "${aws_s3_bucket.raw_data.arn}/*"
+        ]
       },
+     
+      {
+        Effect = "Allow"
+        Action = [
+          "textract:AnalyzeDocument",       # For single page (legacy)
+          "textract:StartDocumentAnalysis", # For multi-page PDF start
+          "textract:GetDocumentAnalysis"    # For checking results
+        ]
+        Resource = "*"
+      },
+      
       {
         Effect = "Allow"
         Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
@@ -117,8 +164,8 @@ resource "aws_lambda_function" "ingestor" {
   role          = aws_iam_role.ingestion_role.arn
   handler       = "lambda_function.lambda_handler"
   runtime       = "python3.9"
-   
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+  timeout = 60
 
   environment {
     variables = {
@@ -137,13 +184,10 @@ resource "aws_lambda_permission" "allow_s3" {
 
 resource "aws_s3_bucket_notification" "bucket_notification" {
   bucket = aws_s3_bucket.raw_data.id
-
   lambda_function {
     lambda_function_arn = aws_lambda_function.ingestor.arn
     events              = ["s3:ObjectCreated:*"]
-    filter_suffix       = ".csv"  # Only trigger for CSV files
   }
-
   depends_on = [aws_lambda_permission.allow_s3]
 }
 
@@ -155,32 +199,24 @@ resource "aws_ecr_repository" "app_repo" {
 
 resource "aws_iam_role" "apprunner_role" {
   name = "roothealth_apprunner_role"
-
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
       Action = "sts:AssumeRole"
       Effect = "Allow"
-      Principal = {
-        Service = "tasks.apprunner.amazonaws.com"
-      }
+      Principal = { Service = "tasks.apprunner.amazonaws.com" }
     }]
   })
 }
 
 resource "aws_iam_policy" "apprunner_policy" {
   name = "roothealth_apprunner_policy"
-
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
         Effect = "Allow"
-        Action = [
-          "dynamodb:Scan",
-          "dynamodb:Query",
-          "dynamodb:GetItem"
-        ]
+        Action = ["dynamodb:Scan", "dynamodb:Query", "dynamodb:GetItem"]
         Resource = aws_dynamodb_table.health_stats.arn
       }
     ]
@@ -209,34 +245,42 @@ resource "aws_iam_role_policy_attachment" "apprunner_access_attach" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess"
 }
 
- resource "aws_apprunner_service" "dashboard" {
-   service_name = "roothealth-dashboard"
+resource "aws_apprunner_service" "dashboard" {
+  service_name = "roothealth-dashboard"
 
-   source_configuration {
-     authentication_configuration {
-       access_role_arn = aws_iam_role.apprunner_access_role.arn
-     }
-    
-     auto_deployments_enabled = true 
+  source_configuration {
+    authentication_configuration {
+      access_role_arn = aws_iam_role.apprunner_access_role.arn
+    }
+    auto_deployments_enabled = true 
+    image_repository {
+      image_identifier      = "${aws_ecr_repository.app_repo.repository_url}:latest"
+      image_repository_type = "ECR"
+      image_configuration {
+        port = "8080"
+        runtime_environment_variables = {
+          DYNAMODB_TABLE       = aws_dynamodb_table.health_stats.name
+          AWS_REGION           = "us-east-1"
+          COGNITO_USER_POOL_ID = aws_cognito_user_pool.users.id
+          COGNITO_CLIENT_ID    = aws_cognito_user_pool_client.client.id
+        }
+      }
+    }
+  }
+  instance_configuration {
+    instance_role_arn = aws_iam_role.apprunner_role.arn
+  }
+  health_check_configuration {
+    protocol = "TCP"
+    interval = 10
+    timeout  = 5
+  }
+  depends_on = [aws_iam_role_policy_attachment.apprunner_access_attach]
+}
 
-     image_repository {
-       image_identifier      = "${aws_ecr_repository.app_repo.repository_url}:latest"
-       image_repository_type = "ECR"
-      
-       image_configuration {
-         port = "8080"
-         runtime_environment_variables = {
-           DYNAMODB_TABLE = aws_dynamodb_table.health_stats.name
-         }
-       }
-     }
-   }
-   instance_configuration {
-     instance_role_arn = aws_iam_role.apprunner_role.arn
-   }
-   depends_on = [aws_iam_role_policy_attachment.apprunner_access_attach]
- }
-
- output "dashboard_url" {
-   value = aws_apprunner_service.dashboard.service_url
- }
+output "s3_bucket_name" { value = aws_s3_bucket.raw_data.id }
+output "dynamodb_table_name" { value = aws_dynamodb_table.health_stats.name }
+output "ecr_url" { value = aws_ecr_repository.app_repo.repository_url }
+output "dashboard_url" { value = aws_apprunner_service.dashboard.service_url }
+output "cognito_user_pool_id" { value = aws_cognito_user_pool.users.id }
+output "cognito_client_id" { value = aws_cognito_user_pool_client.client.id }
