@@ -1,7 +1,14 @@
 version: '3.8'
 services:
   app:
-    image: 389930963141.dkr.ecr.us-east-1.amazonaws.com/roothealth-dashboard:LATEST_HASH
+    image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/roothealth-dashboard:LATEST_HASH
     ports:
       - "80:8080"
     restart: always
+    
+    environment:
+      - COGNITO_USER_POOL_ID
+      - COGNITO_CLIENT_ID
+      - AWS_REGION
+      - DYNAMODB_TABLE
+      - S3_BUCKET_NAME
