@@ -8,7 +8,7 @@ import time
 import json
 from pycognito import Cognito
 from boto3.dynamodb.conditions import Key
-from datetime import datetime, timedelta
+from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
 REGION = os.environ.get('AWS_REGION', 'us-east-1')
@@ -199,15 +199,12 @@ with st.sidebar:
         
         if st.form_submit_button("Save Log"):
             ts = str(int(time.time()))
-            
             def save_metric(n, v, u):
                 table.put_item(Item={'user_id': st.session_state.username, 'record_id': f"{n.replace(' ','_')}_{ts}", 'metric': n, 'value': str(v), 'unit': u, 'upload_timestamp': ts, 'source_file': 'Daily_Log'})
-            
             save_metric("Body Weight", w, "lbs")
             save_metric("Sleep Duration", sleep, "hrs")
             save_metric("Energy Level", energy, "/10")
             save_metric("Stress Level", stress, "/10")
-            
             st.success("Logged!"); time.sleep(0.5); st.rerun()
     
     if st.button("Log Out"): st.session_state.authenticated = False; st.rerun()
@@ -259,13 +256,16 @@ if page == "Dashboard":
 
         st.markdown("<br>", unsafe_allow_html=True)
         
-        # Consistency Heatmap
         st.subheader("Consistency")
-        daily_counts = df.groupby(df['Date'].dt.date).size().reset_index(name='logs')
-        fig_heat = px.bar(daily_counts, x='Date', y='logs', title=None)
-        fig_heat.update_layout(height=150, margin=dict(l=0,r=0,t=0,b=0), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#5F6B7C")
-        fig_heat.update_traces(marker_color="#4CAF50")
-        st.plotly_chart(fig_heat, use_container_width=True)
+        daily_logs = df[df['source_file'] == 'Daily_Log']
+        if not daily_logs.empty:
+            daily_counts = daily_logs.groupby(daily_logs['Date'].dt.date).size().reset_index(name='logs')
+            fig_heat = px.bar(daily_counts, x='Date', y='logs', title=None)
+            fig_heat.update_layout(height=150, margin=dict(l=0,r=0,t=0,b=0), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#5F6B7C")
+            fig_heat.update_traces(marker_color="#4CAF50")
+            st.plotly_chart(fig_heat, use_container_width=True)
+        else:
+            st.info("Log your daily metrics in the sidebar to build your consistency streak.")
 
         st.subheader("Trends")
         sel = st.selectbox("Select Metric", all_metrics)
