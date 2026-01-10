@@ -173,25 +173,57 @@ with tab_overview:
 
 with tab_upload:
     st.header("Upload Lab Results")
-    st.write("Upload your blood work CSV here. It will be automatically parsed and added to your dashboard.")
+    st.write("Upload your blood work CSV or PDF here. We will process it and auto-refresh when done.")
     
-    uploaded_file = st.file_uploader("Choose a CSV file", type=["csv", "pdf"])
-    
+    uploaded_file = st.file_uploader("Choose a file", type=["csv", "pdf"])
 
     if uploaded_file is not None:
         if st.button("Process File"):
             try:
-                safe_email = st.session_state.username.replace("@", "_at_")
-                
                 file_path = f"uploads/{st.session_state.username}/{uploaded_file.name}"
                 
-                s3.put_object(
-                    Bucket=BUCKET_NAME, 
-                    Key=file_path, 
-                    Body=uploaded_file.getvalue()
-                )
+                with st.spinner("Uploading to secure cloud storage..."):
+                    s3.put_object(
+                        Bucket=BUCKET_NAME, 
+                        Key=file_path, 
+                        Body=uploaded_file.getvalue()
+                    )
+
+                progress_text = "Analysis in progress. This typically takes 10-20 seconds..."
+                my_bar = st.progress(0, text=progress_text)
                 
-                st.success(f"✅ Uploaded to {file_path}! Processing... Check the Dashboard in ~10 seconds.")
+                max_retries = 15 
+                success = False
+                
+                for i in range(max_retries):
+                    current_progress = int((i / max_retries) * 90)
+                    my_bar.progress(current_progress, text=f"Processing... ({i*2}s)")
+                    
+                    time.sleep(2) 
+                    
+                    try:
+                        response = table.query(
+                            KeyConditionExpression=Key('user_id').eq(st.session_state.username)
+                        )
+                        items = response.get('Items', [])
+                        
+                        new_data_found = any(item.get('source_file') == file_path for item in items)
+                        
+                        if new_data_found:
+                            my_bar.progress(100, text="Processing Complete!")
+                            success = True
+                            break
+                    except Exception as e:
+                        print(f"Polling error: {e}") 
+                
+                if success:
+                    st.success("✅ Data processed successfully! Refreshing dashboard...")
+                    time.sleep(1)
+                    st.rerun() 
+                else:
+                    my_bar.empty()
+                    st.warning("⚠️ Processing is taking longer than usual. The data will appear shortly. You can manually refresh later.")
+
             except Exception as e:
                 st.error(f"Upload failed: {e}")
 
