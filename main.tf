@@ -126,7 +126,7 @@ resource "aws_iam_role_policy_attachment" "attach_ingestion" {
 
 data "archive_file" "lambda_zip" {
   type        = "zip"
-  source_file = "lambda_function.py"
+  source_dir = "lambda_package"
   output_path = "lambda_function.zip"
 }
 
