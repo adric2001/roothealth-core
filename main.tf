@@ -76,7 +76,7 @@ resource "aws_dynamodb_table" "supplements" {
   name           = "RootHealth_Supplements"
   billing_mode   = "PAY_PER_REQUEST"
   hash_key       = "user_id"
-  range_key      = "item_name" # Sort by drug/supplement name
+  range_key      = "item_name" 
 
   attribute {
     name = "user_id"
@@ -87,10 +87,6 @@ resource "aws_dynamodb_table" "supplements" {
     name = "item_name"
     type = "S"
   }
-}
-
-output "supplements_table_name" {
-  value = aws_dynamodb_table.supplements.name
 }
 
 resource "aws_iam_role" "ingestion_role" {
@@ -118,26 +114,18 @@ resource "aws_iam_policy" "ingestion_policy" {
       },
       {
         Effect = "Allow"
-        Action = [
-          "s3:GetObject",
-          "s3:ListBucket"
-        ]
-        Resource = [
-          "${aws_s3_bucket.raw_data.arn}",
-          "${aws_s3_bucket.raw_data.arn}/*"
-        ]
+        Action = ["s3:GetObject", "s3:ListBucket"]
+        Resource = ["${aws_s3_bucket.raw_data.arn}", "${aws_s3_bucket.raw_data.arn}/*"]
       },
-     
       {
         Effect = "Allow"
         Action = [
-          "textract:AnalyzeDocument",       # For single page (legacy)
-          "textract:StartDocumentAnalysis", # For multi-page PDF start
-          "textract:GetDocumentAnalysis"    # For checking results
+          "textract:AnalyzeDocument",
+          "textract:StartDocumentAnalysis", 
+          "textract:GetDocumentAnalysis"
         ]
         Resource = "*"
       },
-      
       {
         Effect = "Allow"
         Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
@@ -197,90 +185,114 @@ resource "aws_ecr_repository" "app_repo" {
   force_delete         = true
 }
 
-resource "aws_iam_role" "apprunner_role" {
-  name = "roothealth_apprunner_role"
+resource "aws_elastic_beanstalk_application" "app" {
+  name        = "roothealth-core"
+  description = "RootHealth Streamlit Dashboard"
+}
+
+resource "aws_iam_role" "eb_instance_role" {
+  name = "roothealth_eb_instance_role"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
       Action = "sts:AssumeRole"
       Effect = "Allow"
-      Principal = { Service = "tasks.apprunner.amazonaws.com" }
+      Principal = { Service = "ec2.amazonaws.com" }
     }]
   })
 }
 
-resource "aws_iam_policy" "apprunner_policy" {
-  name = "roothealth_apprunner_policy"
+resource "aws_iam_instance_profile" "eb_instance_profile" {
+  name = "roothealth_eb_instance_profile"
+  role = aws_iam_role.eb_instance_role.name
+}
+
+resource "aws_iam_role_policy_attachment" "eb_web_tier" {
+  role       = aws_iam_role.eb_instance_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier"
+}
+
+resource "aws_iam_role_policy_attachment" "eb_docker" {
+  role       = aws_iam_role.eb_instance_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSElasticBeanstalkMulticontainerDocker"
+}
+
+resource "aws_iam_role_policy_attachment" "eb_ecr_read" {
+  role       = aws_iam_role.eb_instance_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+}
+
+resource "aws_iam_role_policy" "eb_app_permissions" {
+  name = "roothealth_eb_custom_policy"
+  role = aws_iam_role.eb_instance_role.id
+
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
         Effect = "Allow"
-        Action = ["dynamodb:Scan", "dynamodb:Query", "dynamodb:GetItem"]
-        Resource = aws_dynamodb_table.health_stats.arn
+        Action = ["dynamodb:Scan", "dynamodb:Query", "dynamodb:GetItem", "dynamodb:PutItem"]
+        Resource = [
+          aws_dynamodb_table.health_stats.arn,
+          aws_dynamodb_table.supplements.arn
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = ["s3:PutObject", "s3:GetObject"]
+        Resource = "${aws_s3_bucket.raw_data.arn}/*"
       }
     ]
   })
 }
 
-resource "aws_iam_role_policy_attachment" "attach_apprunner" {
-  role       = aws_iam_role.apprunner_role.name
-  policy_arn = aws_iam_policy.apprunner_policy.arn
-}
-
-resource "aws_iam_role" "apprunner_access_role" {
-  name = "roothealth_apprunner_access_role"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
-      Principal = { Service = "build.apprunner.amazonaws.com" }
-    }]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "apprunner_access_attach" {
-  role       = aws_iam_role.apprunner_access_role.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess"
-}
-
-resource "aws_apprunner_service" "dashboard" {
-  service_name = "roothealth-dashboard"
-
-  source_configuration {
-    authentication_configuration {
-      access_role_arn = aws_iam_role.apprunner_access_role.arn
-    }
-    auto_deployments_enabled = true 
-    image_repository {
-      image_identifier      = "${aws_ecr_repository.app_repo.repository_url}:latest"
-      image_repository_type = "ECR"
-      image_configuration {
-        port = "8080"
-        runtime_environment_variables = {
-          DYNAMODB_TABLE       = aws_dynamodb_table.health_stats.name
-          AWS_REGION           = "us-east-1"
-          COGNITO_USER_POOL_ID = aws_cognito_user_pool.users.id
-          COGNITO_CLIENT_ID    = aws_cognito_user_pool_client.client.id
-        }
-      }
-    }
+resource "aws_elastic_beanstalk_environment" "env" {
+  name                = "RoothealthCore-env"
+  application         = aws_elastic_beanstalk_application.app.name
+  solution_stack_name = "64bit Amazon Linux 2023 v4.9.0 running Docker"
+  
+  lifecycle {
+    ignore_changes = [version_label]
   }
-  instance_configuration {
-    instance_role_arn = aws_iam_role.apprunner_role.arn
+
+  setting {
+    namespace = "aws:autoscaling:launchconfiguration"
+    name      = "IamInstanceProfile"
+    value     = aws_iam_instance_profile.eb_instance_profile.name
   }
-  health_check_configuration {
-    protocol = "TCP"
-    interval = 10
-    timeout  = 5
+
+  setting {
+    namespace = "aws:elasticbeanstalk:environment"
+    name      = "EnvironmentType"
+    value     = "SingleInstance" # Cheaper for dev/testing
   }
-  depends_on = [aws_iam_role_policy_attachment.apprunner_access_attach]
+
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "DYNAMODB_TABLE"
+    value     = aws_dynamodb_table.health_stats.name
+  }
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "AWS_REGION"
+    value     = "us-east-1"
+  }
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "COGNITO_USER_POOL_ID"
+    value     = aws_cognito_user_pool.users.id
+  }
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "COGNITO_CLIENT_ID"
+    value     = aws_cognito_user_pool_client.client.id
+  }
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "S3_BUCKET_NAME"
+    value     = aws_s3_bucket.raw_data.id
+  }
 }
 
-output "s3_bucket_name" { value = aws_s3_bucket.raw_data.id }
-output "dynamodb_table_name" { value = aws_dynamodb_table.health_stats.name }
+output "eb_cname" { value = aws_elastic_beanstalk_environment.env.cname }
 output "ecr_url" { value = aws_ecr_repository.app_repo.repository_url }
-output "dashboard_url" { value = aws_apprunner_service.dashboard.service_url }
-output "cognito_user_pool_id" { value = aws_cognito_user_pool.users.id }
-output "cognito_client_id" { value = aws_cognito_user_pool_client.client.id }
