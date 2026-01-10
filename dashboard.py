@@ -2,287 +2,266 @@ import streamlit as st
 import boto3
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import os
 import time
+import json
 from pycognito import Cognito
 from boto3.dynamodb.conditions import Key
+from datetime import datetime
+from dateutil.relativedelta import relativedelta
 
 REGION = os.environ.get('AWS_REGION', 'us-east-1')
 USER_POOL_ID = os.environ.get('COGNITO_USER_POOL_ID', '')
 CLIENT_ID = os.environ.get('COGNITO_CLIENT_ID', '')
 TABLE_NAME = os.environ.get('DYNAMODB_TABLE', 'RootHealth_Stats')
-SUPPLEMENTS_TABLE = "RootHealth_Supplements" 
+SUPPLEMENTS_TABLE = "RootHealth_Supplements"
+RELATIONSHIPS_TABLE = "RootHealth_Relationships"
 BUCKET_NAME = os.environ.get('S3_BUCKET_NAME', 'roothealth-raw-files-adric') 
 
-st.set_page_config(page_title="RootHealth", page_icon="🧬", layout="wide")
-
-def init_auth(username=None):
-    if not USER_POOL_ID or not CLIENT_ID:
-        st.error("⚠️ Auth Configuration Missing! Check environment variables.")
-        st.stop()
-    return Cognito(USER_POOL_ID, CLIENT_ID, username=username)
-
-def login_user(username, password):
-    try:
-        u = init_auth(username)
-        u.authenticate(password=password)
-        return u
-    except Exception as e:
-        st.error(f"Login Failed: {e}")
-        return None
-
-def register_user(email, password):
-    try:
-        u = init_auth(email)
-        u.set_base_attributes(email=email)
-        u.register(email, password)
-        st.success("Account created! Check your email for the confirmation code.")
-    except Exception as e:
-        st.error(f"Registration Failed: {e}")
-
-def confirm_user(email, code):
-    try:
-        u = init_auth(email)
-        u.confirm_sign_up(code, username=email)
-        st.success("Account verified! You can now log in.")
-    except Exception as e:
-        st.error(f"Verification Failed: {e}")
-
-if 'authenticated' not in st.session_state:
-    st.session_state.authenticated = False
-if 'username' not in st.session_state:
-    st.session_state.username = None
-
-if not st.session_state.authenticated:
-    st.title("🧬 RootHealth Access")
-    
-    tab1, tab2, tab3 = st.tabs(["Log In", "Sign Up", "Verify Account"])
-    
-    with tab1:
-        email = st.text_input("Email")
-        password = st.text_input("Password", type="password")
-        if st.button("Log In"):
-            if email and password:
-                user = login_user(email, password)
-                if user:
-                    st.session_state.authenticated = True
-                    st.session_state.username = email
-                    st.rerun()
-            else:
-                st.warning("Please enter email and password")
-
-    with tab2:
-        st.subheader("Create a New Account")
-        new_email = st.text_input("New Email")
-        new_pass = st.text_input("New Password", type="password")
-        
-        invite_code = st.text_input("Invitation Code", type="password")
-        
-        server_secret = os.environ.get("INVITE_CODE")
-        
-        if st.button("Create Account"):
-            if not server_secret:
-                st.error("⚠️ Security Error: Server is missing the INVITE_CODE configuration.")
-            elif invite_code != server_secret:
-                st.error("⛔ Invalid Invitation Code. Access Denied.")
-            elif not new_email or not new_pass:
-                st.warning("Please enter email and password")
-            else:
-                register_user(new_email, new_pass)
-
-    with tab3:
-        v_email = st.text_input("Email to Verify")
-        code = st.text_input("Verification Code (from email)")
-        if st.button("Verify"):
-            confirm_user(v_email, code)
-            
-    st.stop() 
+st.set_page_config(page_title="RootHealth OS", page_icon="🧬", layout="wide", initial_sidebar_state="collapsed")
+st.markdown("""<style>.block-container { padding-top: 1rem; padding-bottom: 5rem; } div[data-testid="stMetric"] { background-color: #1E1E1E; padding: 15px; border-radius: 10px; border: 1px solid #333; } section[data-testid="stSidebar"] { background-color: #0E1117; } div.stButton > button { width: 100%; border-radius: 8px; font-weight: bold; }</style>""", unsafe_allow_html=True)
 
 dynamodb = boto3.resource('dynamodb', region_name=REGION)
 table = dynamodb.Table(TABLE_NAME)
 supp_table = dynamodb.Table(SUPPLEMENTS_TABLE)
+rel_table = dynamodb.Table(RELATIONSHIPS_TABLE)
 s3 = boto3.client('s3', region_name=REGION)
+bedrock = boto3.client('bedrock-runtime', region_name=REGION)
 
-st.sidebar.title("🧬 RootHealth")
-st.sidebar.write(f"User: **{st.session_state.username}**")
-if st.sidebar.button("Log Out"):
-    st.session_state.authenticated = False
-    st.session_state.username = None
-    st.rerun()
+def get_time_diff(d1, d2):
+    diff = relativedelta(d1, d2)
+    if diff.years > 0: return f"{diff.years}y"
+    if diff.months > 0: return f"{diff.months}mo"
+    if diff.weeks > 0: return f"{diff.weeks}w"
+    return f"{diff.days}d"
 
-tab_overview, tab_upload, tab_stack = st.tabs(["📊 Dashboard", "📤 Upload Data", "💊 My Stack"])
+def save_user_preferences(metrics_list):
+    try:
+        table.put_item(Item={
+            'user_id': st.session_state.username,
+            'record_id': 'USER_SETTINGS', 
+            'favorites': metrics_list,
+            'upload_timestamp': str(int(time.time()))
+        })
+        return True
+    except Exception as e:
+        st.error(f"Save failed: {e}")
+        return False
 
-with tab_overview:
-    st.header("Biometric Optimization Dashboard")
+def get_user_preferences():
+    try:
+        response = table.get_item(Key={'user_id': st.session_state.username, 'record_id': 'USER_SETTINGS'})
+        if 'Item' in response:
+            return response['Item'].get('favorites', [])
+    except: pass
+    return ["Testosterone, Total", "Vitamin D", "Ferritin", "Body Weight"]
 
-    def get_data(user_id):
-        try:
-            response = table.scan()
-            items = response.get('Items', [])
-            return [i for i in items if i['user_id'] == user_id]
-        except Exception as e:
-            st.error(f"Database Error: {e}")
-            return []
+def init_auth(username=None):
+    if not USER_POOL_ID or not CLIENT_ID: st.stop()
+    return Cognito(USER_POOL_ID, CLIENT_ID, username=username)
 
-    with st.spinner('Syncing data...'):
-        raw_data = get_data(st.session_state.username)
+def login_user(username, password):
+    try: u = init_auth(username); u.authenticate(password=password); return u
+    except: return None
 
-    if not raw_data:
-        st.info("👋 Welcome! You have no biometric data yet. Go to the 'Upload Data' tab to get started.")
+def register_user(email, password):
+    try: u = init_auth(email); u.set_base_attributes(email=email); u.register(email, password); st.success("Check email for code.")
+    except Exception as e: st.error(f"Error: {e}")
+
+def confirm_user(email, code):
+    try: u = init_auth(email); u.confirm_sign_up(code, username=email); st.success("Verified!")
+    except Exception as e: st.error(f"Error: {e}")
+
+def run_ai_coach(user_data, user_stack):
+    csv_data = user_data.to_csv(index=False)
+    stack_text = "\n".join([f"- {s['item_name']} ({s['dosage']} {s['frequency']})" for s in user_stack]) if user_stack else "No supplements."
+    prompt = f"You are a Biohacking Coach. DATA: {csv_data} STACK: {stack_text} TASK: 1. Correlations? 2. Protocol Audit? 3. Action Plan? Tone: Direct."
+    body = json.dumps({"anthropic_version": "bedrock-2023-05-31", "max_tokens": 2000, "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}]})
+    try:
+        r = bedrock.invoke_model(modelId="anthropic.claude-3-5-sonnet-20240620-v1:0", body=body)
+        return json.loads(r['body'].read())['content'][0]['text']
+    except Exception as e: return f"AI Error: {e}"
+
+if 'authenticated' not in st.session_state: st.session_state.authenticated = False
+if 'username' not in st.session_state: st.session_state.username = None
+
+if not st.session_state.authenticated:
+    st.title("🧬 RootHealth OS")
+    t1, t2, t3 = st.tabs(["Log In", "Sign Up", "Verify"])
+    with t1:
+        e, p = st.text_input("Email"), st.text_input("Password", type="password")
+        if st.button("Log In"):
+            if login_user(e, p): st.session_state.authenticated = True; st.session_state.username = e; st.rerun()
+    with t2:
+        ne, np = st.text_input("New Email"), st.text_input("New Password", type="password")
+        ic = st.text_input("Invite Code", type="password")
+        if st.button("Create"):
+            if ic == os.environ.get("INVITE_CODE"): register_user(ne, np)
+            else: st.error("Invalid Code")
+    with t3:
+        ve, vc = st.text_input("Verify Email"), st.text_input("Code")
+        if st.button("Verify"): confirm_user(ve, vc)
+    st.stop()
+
+with st.sidebar:
+    st.title("🧬 RootHealth")
+    
+    with st.expander("📝 Quick Log", expanded=False):
+        with st.form("log"):
+            w = st.number_input("Weight (lbs)", step=0.1)
+            if st.form_submit_button("Save"):
+                ts = str(int(time.time()))
+                table.put_item(Item={'user_id': st.session_state.username, 'record_id': f"Weight_{ts}", 'metric': "Body Weight", 'value': str(w), 'unit': 'lbs', 'upload_timestamp': ts})
+                st.success("Saved")
+                time.sleep(0.5); st.rerun()
+                
+    st.markdown("---")
+    if st.button("Log Out"): st.session_state.authenticated = False; st.rerun()
+
+tabs = st.tabs(["📊 Dashboard", "🧠 AI Analysis", "📤 Upload", "💊 Stack", "🤝 Coaching"])
+
+def get_data(uid):
+    try: return [i for i in table.query(KeyConditionExpression=Key('user_id').eq(uid))['Items']]
+    except: return []
+
+raw_data = get_data(st.session_state.username)
+df = pd.DataFrame(raw_data)
+if not df.empty:
+    df['value'] = pd.to_numeric(df['value'], errors='coerce')
+    df['Date'] = pd.to_datetime(pd.to_numeric(df['upload_timestamp'].fillna(0)), unit='s')
+    df = df.dropna(subset=['value']).sort_values(by='Date')
+
+with tabs[0]:
+    st.subheader("Overview")
+    if df.empty: 
+        st.info("No data yet. Go to Upload tab.")
     else:
-        df = pd.DataFrame(raw_data)
+        available_metrics = sorted(df['metric'].unique().tolist())
+        saved_favorites = get_user_preferences()
+        
+        valid_defaults = [m for m in saved_favorites if m in available_metrics]
+        
+        with st.expander("⚙️ Configure Dashboard Widgets", expanded=False):
+            selected_kpis = st.multiselect(
+                "Select Key Biomarkers to Display:", 
+                options=available_metrics, 
+                default=valid_defaults
+            )
+            if st.button("Save Layout"):
+                if save_user_preferences(selected_kpis):
+                    st.success("Layout Saved!")
+                    time.sleep(1); st.rerun()
+        
+        if selected_kpis:
+            cols = st.columns(4)
+            
+            for i, metric in enumerate(selected_kpis):
+                m_df = df[df['metric'] == metric].sort_values(by='Date')
+                
+                if m_df.empty: continue
+                
+                curr_row = m_df.iloc[-1]
+                curr_val = curr_row['value']
+                curr_unit = curr_row['unit']
+                
+                if len(m_df) > 1:
+                    prev_row = m_df.iloc[-2]
+                    prev_val = prev_row['value']
+                    
+                    diff = curr_val - prev_val
+                    pct = (diff / prev_val) * 100
+                    
+                    time_str = get_time_diff(curr_row['Date'], prev_row['Date'])
+                    
+                    display_val = f"{prev_val} → {curr_val}"
+                    delta_str = f"{diff:+.1f} ({pct:+.1f}%) in {time_str}"
+                else:
+                    display_val = f"{curr_val}"
+                    delta_str = "First Record"
 
-        if 'upload_timestamp' not in df.columns:
-            df['upload_timestamp'] = 0 
-        df['upload_timestamp'] = df['upload_timestamp'].fillna(0)
-        df['upload_timestamp'] = pd.to_numeric(df['upload_timestamp'])
-        df['Date'] = pd.to_datetime(df['upload_timestamp'], unit='s')
-        df['value'] = pd.to_numeric(df['value'], errors='coerce')
-
-        df = df.dropna(subset=['value'])
-
-        st.subheader("Key Biomarkers (Latest)")
-        if not df.empty:
-            latest_date = df['Date'].max()
-            latest_data = df[df['Date'] == latest_date]
-
-            c1, c2, c3 = st.columns(3)
-
-            def get_metric_latest(metric_name):
-                row = latest_data[latest_data['metric'] == metric_name]
-                if not row.empty:
-                    return row.iloc[0]['value'], row.iloc[0]['unit']
-                return None, None
-
-            test_val, test_unit = get_metric_latest("Testosterone, Total")
-            if test_val: c1.metric("Testosterone", f"{test_val} {test_unit}")
-
-            vit_val, vit_unit = get_metric_latest("Vitamin D")
-            if vit_val: c2.metric("Vitamin D", f"{vit_val} {vit_unit}")
-
-            fer_val, fer_unit = get_metric_latest("Ferritin")
-            if fer_val: c3.metric("Ferritin", f"{fer_val} {fer_unit}")
+                with cols[i % 4]:
+                    st.metric(
+                        label=metric,
+                        value=display_val + f" {curr_unit}",
+                        delta=delta_str
+                    )
+        else:
+            st.info("Select metrics in the configuration menu above.")
 
         st.markdown("---")
-        st.subheader("Trends Over Time")
-        unique_metrics = df['metric'].unique().tolist()
-        if unique_metrics:
-            selected_metric = st.selectbox("Select Biomarker to Analyze", unique_metrics)
-            chart_data = df[df['metric'] == selected_metric].sort_values(by="Date")
-
-            if not chart_data.empty:
-                fig = px.line(chart_data, x="Date", y="value", title=f"{selected_metric} History", markers=True)
-                st.plotly_chart(fig, use_container_width=True)
+        st.subheader("Deep Dive")
+        sel = st.selectbox("Select Metric", available_metrics)
         
-        with st.expander("View Raw Database Records"):
-            st.dataframe(df)
-
-with tab_upload:
-    st.header("Upload Lab Results")
-    st.write("Upload your blood work CSV or PDF files here.")
-    
-    uploaded_files = st.file_uploader("Choose files", type=["csv", "pdf"], accept_multiple_files=True)
-
-    if uploaded_files:
-        if st.button("Process Files"):
-            try:
-                target_paths = []
-                with st.spinner(f"Uploading {len(uploaded_files)} files..."):
-                    for uploaded_file in uploaded_files:
-                        file_path = f"uploads/{st.session_state.username}/{uploaded_file.name}"
-                        s3.put_object(
-                            Bucket=BUCKET_NAME, 
-                            Key=file_path, 
-                            Body=uploaded_file.getvalue()
-                        )
-                        target_paths.append(file_path)
-
-                progress_text = "Analysis in progress..."
-                my_bar = st.progress(0, text=progress_text)
-                
-                max_retries = 20 
-                success = False
-                
-                for i in range(max_retries):
-                    current_progress = int((i / max_retries) * 90)
-                    my_bar.progress(current_progress, text=f"Processing... ({i*2}s)")
-                    
-                    time.sleep(2) 
-                    
-                    try:
-                        response = table.query(
-                            KeyConditionExpression=Key('user_id').eq(st.session_state.username)
-                        )
-                        items = response.get('Items', [])
-                        
-                        found_files = set()
-                        for item in items:
-                            if item.get('source_file') in target_paths:
-                                found_files.add(item.get('source_file'))
-                        
-                        if len(found_files) >= len(target_paths):
-                            my_bar.progress(100, text="Processing Complete!")
-                            success = True
-                            break
-                    except Exception as e:
-                        pass
-                
-                if success:
-                    st.success("✅ All files processed successfully! Refreshing...")
-                    time.sleep(1)
-                    st.rerun()
-                else:
-                    st.warning("Processing is running in the background. Data will appear shortly.")
-                    time.sleep(2)
-                    st.rerun()
-
-            except Exception as e:
-                st.error(f"Upload failed: {e}")
-
-with tab_stack:
-    st.header("Current Protocol")
-    st.write("Track your supplements and medications.")
-    
-    with st.form("add_supp_form"):
-        c1, c2, c3 = st.columns(3)
-        new_item = c1.text_input("Name (e.g. Vitamin D)")
-        new_dose = c2.text_input("Dosage (e.g. 5000 IU)")
-        new_freq = c3.selectbox("Frequency", ["Daily", "EOD", "Weekly", "As Needed"])
-        submitted = st.form_submit_button("Add to Stack")
+        chart_df = df[df['metric']==sel]
         
-        if submitted and new_item:
-            try:
-                supp_table.put_item(
-                    Item={
-                        'user_id': st.session_state.username,
-                        'item_name': new_item,
-                        'dosage': new_dose,
-                        'frequency': new_freq
-                    }
-                )
-                st.success(f"Added {new_item} to stack.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error saving item: {e}")
-
-    st.markdown("---")
-    try:
-        response = supp_table.query(
-            KeyConditionExpression=Key('user_id').eq(st.session_state.username)
-        )
-        items = response.get('Items', [])
+        fig = px.line(chart_df, x="Date", y="value", markers=True, title=f"{sel} History")
         
-        if items:
-            stack_df = pd.DataFrame(items)
-            st.table(stack_df[['item_name', 'dosage', 'frequency']])
+        if len(chart_df) > 1:
+            start_val = chart_df.iloc[0]['value']
+            end_val = chart_df.iloc[-1]['value']
+            fig.add_annotation(
+                x=chart_df.iloc[-1]['Date'], y=end_val,
+                text=f"Total Change: {end_val - start_val:+.1f}",
+                showarrow=True, arrowhead=1
+            )
             
-            if st.button("⚡ Run Interaction Check"):
-                st.info("AI Analysis Engine coming in Phase 3 update...")
-        else:
-            st.info("Your stack is empty. Add items above.")
+        st.plotly_chart(fig, use_container_width=True)
+
+with tabs[1]:
+    st.header("🧠 Intelligence Center")
+    if df.empty: st.warning("Upload data first.")
+    else:
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            st.subheader("Correlation")
+            all_m = df['metric'].unique()
+            m1 = st.selectbox("Left Axis", all_m, index=0)
+            m2 = st.selectbox("Right Axis", all_m, index=1 if len(all_m)>1 else 0)
             
-    except Exception as e:
-        if "ResourceNotFoundException" in str(e):
-            st.warning("Supplements table not found. Please run 'terraform apply'.")
-        else:
-            st.error(f"Error fetching stack: {e}")
+            d1 = df[df['metric'] == m1].sort_values('Date')
+            d2 = df[df['metric'] == m2].sort_values('Date')
+            
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=d1['Date'], y=d1['value'], name=m1, mode='lines+markers', line=dict(color='#00FF99')))
+            fig.add_trace(go.Scatter(x=d2['Date'], y=d2['value'], name=m2, mode='lines+markers', line=dict(color='#00CCFF'), yaxis='y2'))
+            fig.update_layout(title=f"{m1} vs {m2}", yaxis=dict(title=m1), yaxis2=dict(title=m2, overlaying='y', side='right'), plot_bgcolor="#1E1E1E", paper_bgcolor="#1E1E1E", font_color="white", legend=dict(orientation="h", y=1.1))
+            st.plotly_chart(fig, use_container_width=True)
+
+        with c2:
+            st.subheader("AI Coach")
+            if st.button("⚡ Analyze", type="primary"):
+                with st.spinner("Thinking..."):
+                    try: stack = supp_table.query(KeyConditionExpression=Key('user_id').eq(st.session_state.username)).get('Items', [])
+                    except: stack = []
+                    advice = run_ai_coach(df, stack)
+                    st.markdown(advice)
+
+with tabs[2]:
+    st.header("Upload")
+    files = st.file_uploader("PDF/CSV", accept_multiple_files=True)
+    if files and st.button("Upload"):
+        for f in files: s3.put_object(Bucket=BUCKET_NAME, Key=f"uploads/{st.session_state.username}/{f.name}", Body=f.getvalue())
+        st.success("Uploaded. Processing...")
+
+with tabs[3]:
+    st.header("Stack")
+    c1, c2 = st.columns([2,1])
+    with c2:
+        with st.form("add"):
+            n = st.text_input("Name"); d = st.text_input("Dose"); f = st.selectbox("Freq", ["Daily", "AM/PM", "Weekly"])
+            if st.form_submit_button("Add"): supp_table.put_item(Item={'user_id': st.session_state.username, 'item_name': n, 'dosage': d, 'frequency': f}); st.rerun()
+    with c1:
+        try: 
+            items = supp_table.query(KeyConditionExpression=Key('user_id').eq(st.session_state.username)).get('Items', [])
+            if items: st.dataframe(pd.DataFrame(items)[['item_name', 'dosage', 'frequency']], use_container_width=True)
+        except: pass
+
+with tabs[4]:
+    st.header("Coaching")
+    role = st.radio("Mode", ["Client", "Coach"])
+    if role == "Client":
+        coach = st.text_input("Coach Email")
+        if st.button("Link"): rel_table.put_item(Item={'coach_id': coach, 'client_id': st.session_state.username}); st.success("Linked!")
+    else:
+        st.info("Coach Dashboard active.")

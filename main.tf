@@ -78,6 +78,23 @@ resource "aws_dynamodb_table" "supplements" {
   }
 }
 
+resource "aws_dynamodb_table" "relationships" {
+  name           = "RootHealth_Relationships"
+  billing_mode   = "PAY_PER_REQUEST"
+  hash_key       = "coach_id"
+  range_key      = "client_id"
+
+  attribute {
+    name = "coach_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "client_id"
+    type = "S"
+  }
+}
+
 resource "aws_iam_role" "ingestion_role" {
   name = "roothealth_ingestion_role"
   assume_role_policy = jsonencode({
@@ -92,7 +109,6 @@ resource "aws_iam_role" "ingestion_role" {
 
 resource "aws_iam_policy" "ingestion_policy" {
   name = "roothealth_ingestion_policy"
-
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -111,10 +127,10 @@ resource "aws_iam_policy" "ingestion_policy" {
         Action = [
           "bedrock:InvokeModel",
           "aws-marketplace:ViewSubscriptions",
-          "aws-marketplace:Subscribe",
+          "aws-marketplace:Subscribe", 
           "aws-marketplace:Unsubscribe"
         ]
-        Resource = "*"
+        Resource = "*" 
       },
       {
         Effect = "Allow"
@@ -132,7 +148,7 @@ resource "aws_iam_role_policy_attachment" "attach_ingestion" {
 
 data "archive_file" "lambda_zip" {
   type        = "zip"
-  source_dir = "lambda_package"
+  source_file = "lambda_function.py"
   output_path = "lambda_function.zip"
 }
 
@@ -141,7 +157,7 @@ resource "aws_lambda_function" "ingestor" {
   function_name = "RootHealthIngestor"
   role          = aws_iam_role.ingestion_role.arn
   handler       = "lambda_function.lambda_handler"
-  runtime       = "python3.11" 
+  runtime       = "python3.11"
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
   timeout = 60
 
@@ -221,12 +237,24 @@ resource "aws_iam_role_policy" "eb_app_permissions" {
       {
         Effect = "Allow"
         Action = ["dynamodb:Scan", "dynamodb:Query", "dynamodb:GetItem", "dynamodb:PutItem"]
-        Resource = [aws_dynamodb_table.health_stats.arn, aws_dynamodb_table.supplements.arn]
+        Resource = [
+            aws_dynamodb_table.health_stats.arn, 
+            aws_dynamodb_table.supplements.arn,
+            aws_dynamodb_table.relationships.arn
+        ]
       },
       {
         Effect = "Allow"
         Action = ["s3:PutObject", "s3:GetObject"]
         Resource = "${aws_s3_bucket.raw_data.arn}/*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+            "bedrock:InvokeModel",
+            "bedrock:ListFoundationModels"
+        ]
+        Resource = "*"
       }
     ]
   })
@@ -235,22 +263,24 @@ resource "aws_iam_role_policy" "eb_app_permissions" {
 resource "aws_elastic_beanstalk_environment" "env" {
   name                = "RoothealthCore-env"
   application         = aws_elastic_beanstalk_application.app.name
-  
-  solution_stack_name = "64bit Amazon Linux 2023 v4.9.0 running Docker"
+  solution_stack_name = "64bit Amazon Linux 2023 v4.4.0 running Docker"
   
   lifecycle {
-    ignore_changes = [version_label]
+    ignore_changes = [version_label, setting]
   }
+
   setting {
     namespace = "aws:autoscaling:launchconfiguration"
     name      = "IamInstanceProfile"
     value     = aws_iam_instance_profile.eb_instance_profile.name
   }
+
   setting {
     namespace = "aws:elasticbeanstalk:environment"
     name      = "EnvironmentType"
     value     = "SingleInstance" 
   }
+
   setting {
     namespace = "aws:elasticbeanstalk:application:environment"
     name      = "DYNAMODB_TABLE"
@@ -279,10 +309,9 @@ resource "aws_elastic_beanstalk_environment" "env" {
   setting {
     namespace = "aws:elasticbeanstalk:application:environment"
     name      = "INVITE_CODE"
-    value     = "PLACEHOLDER_MANAGED_BY_GITHUB" 
+    value     = "PLACEHOLDER_MANAGED_BY_GITHUB"
   }
 }
-
 
 output "eb_cname" { value = aws_elastic_beanstalk_environment.env.cname }
 output "ecr_url" { value = aws_ecr_repository.app_repo.repository_url }
