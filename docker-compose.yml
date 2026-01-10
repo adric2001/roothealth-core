@@ -1,8 +1,7 @@
 version: '3.8'
 services:
   app:
-    # The GitHub Action will automatically replace LATEST_HASH with the real ID
-    image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/roothealth-dashboard:LATEST_HASH
+    image: 389930963141.dkr.ecr.us-east-1.amazonaws.com/roothealth-dashboard:LATEST_HASH
     ports:
       - "80:8080"
     restart: always
