@@ -92,6 +92,7 @@ resource "aws_iam_role" "ingestion_role" {
 
 resource "aws_iam_policy" "ingestion_policy" {
   name = "roothealth_ingestion_policy"
+
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -107,8 +108,13 @@ resource "aws_iam_policy" "ingestion_policy" {
       },
       {
         Effect = "Allow"
-        Action = ["bedrock:InvokeModel"]
-        Resource = "*" 
+        Action = [
+          "bedrock:InvokeModel",
+          "aws-marketplace:ViewSubscriptions",
+          "aws-marketplace:Subscribe",
+          "aws-marketplace:Unsubscribe"
+        ]
+        Resource = "*"
       },
       {
         Effect = "Allow"
