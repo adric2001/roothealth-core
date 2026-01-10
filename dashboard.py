@@ -19,6 +19,16 @@ SUPPLEMENTS_TABLE = "RootHealth_Supplements"
 RELATIONSHIPS_TABLE = "RootHealth_Relationships"
 BUCKET_NAME = os.environ.get('S3_BUCKET_NAME', 'roothealth-raw-files-adric') 
 
+OPTIMAL_RANGES = {
+    "Testosterone, Total": {"min": 264, "max": 916, "opt_min": 700, "opt_max": 1100, "unit": "ng/dL"},
+    "Vitamin D": {"min": 30, "max": 100, "opt_min": 50, "opt_max": 80, "unit": "ng/mL"},
+    "Ferritin": {"min": 30, "max": 400, "opt_min": 100, "opt_max": 150, "unit": "ng/mL"},
+    "Estradiol": {"min": 7, "max": 50, "opt_min": 20, "opt_max": 30, "unit": "pg/mL"},
+    "TSH": {"min": 0.4, "max": 4.5, "opt_min": 0.5, "opt_max": 2.0, "unit": "mIU/L"},
+    "Body Weight": {"min": 100, "max": 300, "opt_min": 170, "opt_max": 190, "unit": "lbs"},
+    "Sleep Duration": {"min": 0, "max": 12, "opt_min": 7, "opt_max": 9, "unit": "hrs"}
+}
+
 st.set_page_config(page_title="RootHealth OS", page_icon="🧬", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
@@ -64,19 +74,8 @@ def render_metric_card(label, value, unit, delta_val, delta_pct, time_str):
         delta_html = f'<span class="delta-negative">▼ {abs(delta_val):.1f} ({abs(delta_pct):.0f}%)</span> <span class="delta-neutral">in {time_str}</span>'
     else:
         delta_html = '<span class="delta-neutral">No change</span>'
-        
-    if delta_val == 0 and time_str == "New":
-        delta_html = '<span class="delta-neutral">✨ First Record</span>'
-
-    html = f"""
-    <div class="metric-card">
-        <div class="metric-label">{label}</div>
-        <div class="metric-value">
-            {value} <span class="metric-unit">{unit}</span>
-        </div>
-        <div>{delta_html}</div>
-    </div>
-    """
+    if delta_val == 0 and time_str == "New": delta_html = '<span class="delta-neutral">✨ First Record</span>'
+    html = f"""<div class="metric-card"><div class="metric-label">{label}</div><div class="metric-value">{value} <span class="metric-unit">{unit}</span></div><div>{delta_html}</div></div>"""
     st.markdown(html, unsafe_allow_html=True)
 
 def get_time_diff(d1, d2):
@@ -87,33 +86,16 @@ def get_time_diff(d1, d2):
     return f"{diff.days}d"
 
 def save_user_preferences(metrics_list):
-    try:
-        table.put_item(Item={
-            'user_id': st.session_state.username,
-            'record_id': 'USER_SETTINGS', 
-            'favorites': metrics_list,
-            'upload_timestamp': str(int(time.time()))
-        })
-        return True
+    try: table.put_item(Item={'user_id': st.session_state.username, 'record_id': 'USER_SETTINGS', 'favorites': metrics_list, 'upload_timestamp': str(int(time.time()))}); return True
     except: return False
 
 def get_user_preferences():
-    try:
-        response = table.get_item(Key={'user_id': st.session_state.username, 'record_id': 'USER_SETTINGS'})
-        if 'Item' in response: return response['Item'].get('favorites', [])
-    except: pass
-    return ["Testosterone, Total", "Vitamin D", "Ferritin", "Body Weight"]
+    try: return table.get_item(Key={'user_id': st.session_state.username, 'record_id': 'USER_SETTINGS'}).get('Item', {}).get('favorites', [])
+    except: return ["Testosterone, Total", "Vitamin D", "Ferritin", "Body Weight"]
 
 def save_user_profile(age, height, gender, goal, weight):
-    try:
-        table.put_item(Item={
-            'user_id': st.session_state.username,
-            'record_id': 'USER_PROFILE', 
-            'age': age, 'height': height, 'gender': gender, 'goal': goal, 'weight': weight,
-            'upload_timestamp': str(int(time.time()))
-        })
-        st.success("Saved!")
-    except: st.error("Error saving profile")
+    try: table.put_item(Item={'user_id': st.session_state.username, 'record_id': 'USER_PROFILE', 'age': age, 'height': height, 'gender': gender, 'goal': goal, 'weight': weight, 'upload_timestamp': str(int(time.time()))}); st.success("Saved!")
+    except: st.error("Error")
 
 def get_user_profile():
     try: return table.get_item(Key={'user_id': st.session_state.username, 'record_id': 'USER_PROFILE'}).get('Item', {})
@@ -125,11 +107,8 @@ def update_manual_data(df_changes):
             ts = str(int(row['Date'].timestamp())) if pd.notnull(row['Date']) else str(int(time.time()))
             rec_id = row.get('record_id')
             if not rec_id or pd.isna(rec_id): rec_id = f"{str(row['metric']).replace(' ', '_')}_{ts}"
-            table.put_item(Item={
-                'user_id': st.session_state.username, 'record_id': rec_id,
-                'metric': row['metric'], 'value': str(row['value']), 'unit': row['unit'], 'upload_timestamp': ts, 'source_file': 'Manual_Edit'
-            })
-        except Exception as e: st.error(f"Failed to update {row.get('metric')}: {e}")
+            table.put_item(Item={'user_id': st.session_state.username, 'record_id': rec_id, 'metric': row['metric'], 'value': str(row['value']), 'unit': row['unit'], 'upload_timestamp': ts, 'source_file': 'Manual_Edit'})
+        except Exception as e: st.error(f"Failed: {e}")
 
 def init_auth(username=None):
     if not USER_POOL_ID or not CLIENT_ID: st.stop()
@@ -140,22 +119,20 @@ def login_user(username, password):
     except: return None
 
 def register_user(email, password):
-    try: u = init_auth(email); u.set_base_attributes(email=email); u.register(email, password); st.success("Check email for code.")
-    except: st.error("Registration failed")
+    try: u = init_auth(email); u.set_base_attributes(email=email); u.register(email, password); st.success("Check email code."); return True
+    except: st.error("Failed"); return False
 
 def confirm_user(email, code):
-    try: u = init_auth(email); u.confirm_sign_up(code, username=email); st.success("Verified!")
-    except: st.error("Verification failed")
+    try: u = init_auth(email); u.confirm_sign_up(code, username=email); st.success("Verified!"); return True
+    except: st.error("Failed"); return False
 
 def run_ai_coach(user_data, user_stack, user_profile):
     csv_data = user_data.to_csv(index=False)
     stack_txt = "\n".join([f"- {s['item_name']} ({s['dosage']} {s['frequency']})" for s in user_stack]) if user_stack else "None"
     prof_txt = f"Age: {user_profile.get('age','?')}\nGoal: {user_profile.get('goal','Health')}\nWeight: {user_profile.get('weight','?')}"
-    prompt = f"Role: Elite Health Coach. Context: {prof_txt}. Labs: {csv_data}. Stack: {stack_txt}. Task: 1. Analysis (Correlate Sleep/Stress if present) 2. Stack Audit 3. Protocol. Tone: Direct."
+    prompt = f"Role: Elite Biohacker Coach. Context: {prof_txt}. Labs: {csv_data}. Stack: {stack_txt}. Task: 1. Analysis 2. Stack Audit 3. Protocol. Tone: Direct."
     body = json.dumps({"anthropic_version": "bedrock-2023-05-31", "max_tokens": 2500, "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}]})
-    try:
-        r = bedrock.invoke_model(modelId="anthropic.claude-3-5-sonnet-20240620-v1:0", body=body)
-        return json.loads(r['body'].read())['content'][0]['text']
+    try: return json.loads(bedrock.invoke_model(modelId="anthropic.claude-3-5-sonnet-20240620-v1:0", body=body)['body'].read())['content'][0]['text']
     except Exception as e: return f"AI Error: {e}"
 
 def get_data(uid):
@@ -186,7 +163,6 @@ if not st.session_state.authenticated:
 with st.sidebar:
     st.title("🧬 RootHealth")
     page = st.radio("Navigation", ["Dashboard", "Data Manager", "AI Coach", "Profile & Stack", "Coaching"], label_visibility="collapsed")
-    
     st.markdown("---")
     st.caption("Daily Bio-Log")
     with st.form("quick_log"):
@@ -196,17 +172,11 @@ with st.sidebar:
         c3, c4 = st.columns(2)
         energy = c3.slider("Energy", 1, 10, 5)
         stress = c4.slider("Stress", 1, 10, 5)
-        
         if st.form_submit_button("Save Log"):
             ts = str(int(time.time()))
-            def save_metric(n, v, u):
+            for n,v,u in [("Body Weight",w,"lbs"),("Sleep Duration",sleep,"hrs"),("Energy Level",energy,"/10"),("Stress Level",stress,"/10")]:
                 table.put_item(Item={'user_id': st.session_state.username, 'record_id': f"{n.replace(' ','_')}_{ts}", 'metric': n, 'value': str(v), 'unit': u, 'upload_timestamp': ts, 'source_file': 'Daily_Log'})
-            save_metric("Body Weight", w, "lbs")
-            save_metric("Sleep Duration", sleep, "hrs")
-            save_metric("Energy Level", energy, "/10")
-            save_metric("Stress Level", stress, "/10")
             st.success("Logged!"); time.sleep(0.5); st.rerun()
-    
     if st.button("Log Out"): st.session_state.authenticated = False; st.rerun()
 
 raw_data = get_data(st.session_state.username)
@@ -218,14 +188,7 @@ if not df.empty:
 
 if page == "Dashboard":
     st.header("Dashboard")
-    if df.empty: 
-        st.info("👋 Welcome! Start by uploading your labs or logging your weight in the sidebar.")
-        st.markdown("""
-        ### Getting Started:
-        1. **Profile:** Set your age/goals in the *Profile* tab.
-        2. **Upload:** Drag & Drop your bloodwork PDF in *Data Manager*.
-        3. **Analyze:** Go to *AI Coach* to get your first audit.
-        """)
+    if df.empty: st.info("👋 Welcome! Upload labs or log weight to start.")
     else:
         all_metrics = sorted(df['metric'].unique().tolist())
         saved_faves = get_user_preferences()
@@ -233,8 +196,7 @@ if page == "Dashboard":
         
         with st.popover("⚙️ Customize Widgets"):
             new_faves = st.multiselect("Visible Metrics", all_metrics, default=current_faves)
-            if st.button("Save Layout"):
-                save_user_preferences(new_faves); st.rerun()
+            if st.button("Save Layout"): save_user_preferences(new_faves); st.rerun()
 
         if current_faves:
             cols = st.columns(3)
@@ -249,62 +211,76 @@ if page == "Dashboard":
                     delta = val - prev['value']
                     pct = (delta / prev['value']) * 100 if prev['value'] != 0 else 0
                     t_str = get_time_diff(curr['Date'], prev['Date'])
-                with cols[i % 3]:
-                    render_metric_card(metric, val, unit, delta, pct, t_str)
-        else:
-            st.info("Select metrics via ⚙️ to display here.")
-
-        st.markdown("<br>", unsafe_allow_html=True)
+                with cols[i % 3]: render_metric_card(metric, val, unit, delta, pct, t_str)
         
+        st.markdown("<br>", unsafe_allow_html=True)
         st.subheader("Consistency")
         daily_logs = df[df['source_file'] == 'Daily_Log']
         if not daily_logs.empty:
             daily_counts = daily_logs.groupby(daily_logs['Date'].dt.date).size().reset_index(name='logs')
-            fig_heat = px.bar(daily_counts, x='Date', y='logs', title=None)
+            fig_heat = px.bar(daily_counts, x='Date', y='logs')
             fig_heat.update_layout(height=150, margin=dict(l=0,r=0,t=0,b=0), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#5F6B7C")
             fig_heat.update_traces(marker_color="#4CAF50")
             st.plotly_chart(fig_heat, use_container_width=True)
-        else:
-            st.info("Log your daily metrics in the sidebar to build your consistency streak.")
+        else: st.info("Log daily metrics to see your streak.")
 
-        st.subheader("Trends")
-        sel = st.selectbox("Select Metric", all_metrics)
-        chart_data = df[df['metric'] == sel]
-        fig = px.line(chart_data, x="Date", y="value", markers=True)
-        fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#8F9BB3", xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor="#2C2F3A"), height=300)
-        fig.update_traces(line_color="#4CAF50", line_width=3, marker_size=8)
-        st.plotly_chart(fig, use_container_width=True)
+        st.subheader("Deep Dive")
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            sel = st.selectbox("Select Metric", all_metrics)
+            # Gauge Logic
+            latest_val = df[df['metric'] == sel].iloc[-1]['value']
+            fig_gauge = go.Figure(go.Indicator(
+                mode = "gauge+number", value = latest_val,
+                title = {'text': "Current Status"},
+                gauge = {
+                    'axis': {'range': [0, latest_val * 1.5]},
+                    'bar': {'color': "white"},
+                    'steps': [{'range': [0, latest_val * 1.5], 'color': "#1A1C24"}],
+                }
+            ))
+            # Apply Optimal Ranges if known
+            if sel in OPTIMAL_RANGES:
+                r = OPTIMAL_RANGES[sel]
+                fig_gauge.update_traces(gauge={
+                    'axis': {'range': [r['min'] * 0.8, r['max'] * 1.1]},
+                    'steps': [
+                        {'range': [r['min']*0.8, r['opt_min']], 'color': "#FF5252"}, # Low
+                        {'range': [r['opt_min'], r['opt_max']], 'color': "#00E676"}, # Optimal
+                        {'range': [r['opt_max'], r['max']*1.1], 'color': "#FF5252"}  # High
+                    ]
+                })
+            fig_gauge.update_layout(height=250, margin=dict(l=20,r=20,t=30,b=20), paper_bgcolor="rgba(0,0,0,0)", font={'color': "white"})
+            st.plotly_chart(fig_gauge, use_container_width=True)
+            
+        with c2:
+            chart_data = df[df['metric'] == sel]
+            fig = px.line(chart_data, x="Date", y="value", markers=True)
+            fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#8F9BB3", xaxis=dict(showgrid=False), yaxis=dict(showgrid=True, gridcolor="#2C2F3A"), height=300)
+            fig.update_traces(line_color="#4CAF50", line_width=3, marker_size=8)
+            
+            # Draw Green Zone on Chart
+            if sel in OPTIMAL_RANGES:
+                r = OPTIMAL_RANGES[sel]
+                fig.add_hrect(y0=r['opt_min'], y1=r['opt_max'], fillcolor="#00E676", opacity=0.1, layer="below", line_width=0)
+            
+            st.plotly_chart(fig, use_container_width=True)
 
 elif page == "Data Manager":
     st.header("Data Manager")
     t1, t2 = st.tabs(["📄 Upload Files", "✍️ Manual Editor"])
-    
     with t1:
-        st.write("Upload PDF or CSV reports.")
-        files = st.file_uploader("Drag and drop", accept_multiple_files=True)
+        files = st.file_uploader("Upload Labs", accept_multiple_files=True)
         if files and st.button("Process Files", type="primary"):
             for f in files: s3.put_object(Bucket=BUCKET_NAME, Key=f"uploads/{st.session_state.username}/{f.name}", Body=f.getvalue())
-            st.success("Uploaded! AI is processing...")
-            
+            st.success("Uploaded!")
     with t2:
         c1, c2 = st.columns([3, 1])
-        c1.write("Edit or Add Data Manually.")
-        
-        if not df.empty:
-            csv = df.to_csv(index=False).encode('utf-8')
-            c2.download_button("Download CSV", csv, "roothealth_data.csv", "text/csv", key='download-csv')
-        
-        if df.empty:
-            edit_df = pd.DataFrame(columns=['metric', 'value', 'unit', 'Date', 'record_id'])
-        else:
-            edit_df = df[['metric', 'value', 'unit', 'Date', 'record_id']].copy()
-            
-        edited_df = st.data_editor(edit_df, num_rows="dynamic", use_container_width=True, column_config={"metric": "Metric", "value": "Result", "unit": "Unit", "Date": st.column_config.DatetimeColumn("Date", format="D MMM YYYY"), "record_id": st.column_config.Column("ID", disabled=True)}, hide_index=True)
-        
-        if st.button("Save Manual Changes"):
-            update_manual_data(edited_df)
-            st.success("Database Updated!")
-            time.sleep(1); st.rerun()
+        c1.write("Edit Data")
+        if not df.empty: c2.download_button("Download CSV", df.to_csv(index=False).encode('utf-8'), "data.csv", "text/csv")
+        edit_df = df[['metric', 'value', 'unit', 'Date', 'record_id']].copy() if not df.empty else pd.DataFrame(columns=['metric', 'value', 'unit', 'Date', 'record_id'])
+        edited_df = st.data_editor(edit_df, num_rows="dynamic", use_container_width=True, hide_index=True)
+        if st.button("Save Changes"): update_manual_data(edited_df); st.success("Updated!"); time.sleep(1); st.rerun()
 
 elif page == "AI Coach":
     st.header("Intelligence Center")
@@ -323,7 +299,6 @@ elif page == "AI Coach":
             fig.add_trace(go.Scatter(x=d2['Date'], y=d2['value'], name=m2, mode='lines+markers', yaxis='y2'))
             fig.update_layout(yaxis=dict(title=m1), yaxis2=dict(title=m2, overlaying='y', side='right'), legend=dict(orientation="h", y=1.1))
             st.plotly_chart(fig, use_container_width=True)
-
     with c2:
         st.subheader("AI Protocol Coach")
         if st.button("⚡ Run Full Audit", type="primary"):
@@ -336,73 +311,51 @@ elif page == "AI Coach":
 elif page == "Profile & Stack":
     st.header("Profile & Stack")
     prof = get_user_profile()
-    
     with st.container(border=True):
         c1, c2, c3 = st.columns(3)
         c1.metric("Age", prof.get('age', 'N/A'))
         c2.metric("Weight", f"{prof.get('weight', 'N/A')} lbs")
         c3.metric("Height", prof.get('height', 'N/A'))
-        
-        with st.expander("Edit Profile Details"):
+        with st.expander("Edit Profile"):
             with st.form("prof_form"):
                 ec1, ec2 = st.columns(2)
                 age = ec1.number_input("Age", value=int(prof.get('age', 25)), step=1)
-                weight = ec1.number_input("Current Weight (lbs)", value=float(prof.get('weight', 180)))
+                weight = ec1.number_input("Weight", value=float(prof.get('weight', 180)))
                 gender = ec1.selectbox("Gender", ["Male", "Female"], index=0 if prof.get('gender') == "Male" else 1)
                 height = ec2.text_input("Height", value=prof.get('height', ""))
-                goal = ec2.selectbox("Primary Goal", ["Optimization / Longevity", "Muscle Gain / Hypertrophy", "Fat Loss", "Cognitive Performance", "Libido / Hormone Health"], index=0)
-                if st.form_submit_button("Save Profile"):
-                    save_user_profile(age, height, gender, goal, weight)
-                    st.rerun()
-
+                goal = ec2.selectbox("Goal", ["Optimization / Longevity", "Muscle Gain / Hypertrophy", "Fat Loss", "Cognitive Performance", "Libido / Hormone Health"], index=0)
+                if st.form_submit_button("Save"): save_user_profile(age, height, gender, goal, weight); st.rerun()
     st.markdown("<br>", unsafe_allow_html=True)
-    
     with st.container(border=True):
         c1, c2 = st.columns([1, 1])
         with c1:
-            st.subheader("Supplement Stack")
+            st.subheader("Stack")
             try: 
                 items = supp_table.query(KeyConditionExpression=Key('user_id').eq(st.session_state.username)).get('Items', [])
-                if not items: st.info("Stack is empty.")
-                else:
-                    for item in items:
-                        col_a, col_b, col_c = st.columns([3, 2, 1])
-                        col_a.markdown(f"**{item['item_name']}**")
-                        col_a.caption(f"{item['dosage']}")
-                        col_b.markdown(f"*{item['frequency']}*")
-                        if col_c.button("🗑️", key=f"del_{item['item_name']}"):
-                            supp_table.delete_item(Key={'user_id': st.session_state.username, 'item_name': item['item_name']})
-                            st.rerun()
-                        st.markdown("---")
+                for item in items:
+                    col_a, col_b, col_c = st.columns([3, 2, 1])
+                    col_a.markdown(f"**{item['item_name']}**")
+                    col_a.caption(f"{item['dosage']}")
+                    col_b.markdown(f"*{item['frequency']}*")
+                    if col_c.button("🗑️", key=f"del_{item['item_name']}"): supp_table.delete_item(Key={'user_id': st.session_state.username, 'item_name': item['item_name']}); st.rerun()
+                    st.markdown("---")
             except: pass
-            
         with c2:
-            st.subheader("Add New Item")
+            st.subheader("Add Item")
             with st.form("stack_add"):
-                n = st.text_input("Name")
-                d = st.text_input("Dose")
-                f = st.selectbox("Freq", ["Daily", "AM/PM", "Weekly", "EOD"])
-                if st.form_submit_button("Add to Stack"):
-                    supp_table.put_item(Item={'user_id': st.session_state.username, 'item_name': n, 'dosage': d, 'frequency': f})
-                    st.rerun()
+                n = st.text_input("Name"); d = st.text_input("Dose"); f = st.selectbox("Freq", ["Daily", "AM/PM", "Weekly", "EOD"])
+                if st.form_submit_button("Add"): supp_table.put_item(Item={'user_id': st.session_state.username, 'item_name': n, 'dosage': d, 'frequency': f}); st.rerun()
 
 elif page == "Coaching":
     st.header("Coaching Portal")
     role = st.radio("I am a:", ["Client", "Coach"], horizontal=True)
     if role == "Client":
-        st.write("Grant access to your coach.")
-        coach_em = st.text_input("Coach Email Address")
-        if st.button("Link Coach"): 
-            rel_table.put_item(Item={'coach_id': coach_em.lower(), 'client_id': st.session_state.username}); st.success("Access Granted!")
+        coach_em = st.text_input("Coach Email")
+        if st.button("Link Coach"): rel_table.put_item(Item={'coach_id': coach_em.lower(), 'client_id': st.session_state.username}); st.success("Access Granted!")
     else:
-        st.subheader("Client Roster")
+        st.subheader("Clients")
         try:
             clients = rel_table.query(KeyConditionExpression=Key('coach_id').eq(st.session_state.username))['Items']
-            if not clients: st.info("No clients linked yet.")
-            else:
-                c_sel = st.selectbox("Select Client", [c['client_id'] for c in clients])
-                if c_sel:
-                    st.markdown(f"### Viewing: {c_sel}")
-                    c_data = get_data(c_sel)
-                    st.dataframe(pd.DataFrame(c_data))
-        except: st.error("Error loading clients")
+            c_sel = st.selectbox("Select Client", [c['client_id'] for c in clients]) if clients else None
+            if c_sel: st.dataframe(pd.DataFrame(get_data(c_sel)))
+        except: st.error("Error")
