@@ -276,7 +276,20 @@ resource "aws_elastic_beanstalk_environment" "env" {
     name      = "S3_BUCKET_NAME"
     value     = aws_s3_bucket.raw_data.id
   }
+  setting {
+    namespace = "aws:elasticbeanstalk:application:environment"
+    name      = "INVITE_CODE"
+    value     = "PLACEHOLDER_MANAGED_BY_GITHUB" 
+  }
+  lifecycle {
+    ignore_changes = [
+      version_label,
+      # Add this line so Terraform doesn't revert your GitHub Secret
+      setting 
+    ]
+  }
 }
+
 
 output "eb_cname" { value = aws_elastic_beanstalk_environment.env.cname }
 output "ecr_url" { value = aws_ecr_repository.app_repo.repository_url }

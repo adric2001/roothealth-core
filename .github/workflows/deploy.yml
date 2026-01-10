@@ -47,6 +47,17 @@ jobs:
         # 2. Zip the file
         zip deploy.zip docker-compose.yml
 
+    - name: Update EB Invite Code
+      run: |
+        aws elasticbeanstalk update-environment \
+          --environment-name RoothealthCore-env \
+          --application-name roothealth-core \
+          --option-settings Namespace=aws:elasticbeanstalk:application:environment,OptionName=INVITE_CODE,Value=${{ secrets.INVITE_CODE }}
+
+    - name: Wait for Environment Update
+      run: |
+        aws elasticbeanstalk wait environment-updated --environment-name RoothealthCore-env
+
     - name: Beanstalk Deploy
       uses: einaregilsson/beanstalk-deploy@v22
       with:

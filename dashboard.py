@@ -72,10 +72,23 @@ if not st.session_state.authenticated:
                 st.warning("Please enter email and password")
 
     with tab2:
+        st.subheader("Create a New Account")
         new_email = st.text_input("New Email")
         new_pass = st.text_input("New Password", type="password")
+        
+        invite_code = st.text_input("Invitation Code", type="password")
+        
+        server_secret = os.environ.get("INVITE_CODE")
+        
         if st.button("Create Account"):
-            register_user(new_email, new_pass)
+            if not server_secret:
+                st.error("⚠️ Security Error: Server is missing the INVITE_CODE configuration.")
+            elif invite_code != server_secret:
+                st.error("⛔ Invalid Invitation Code. Access Denied.")
+            elif not new_email or not new_pass:
+                st.warning("Please enter email and password")
+            else:
+                register_user(new_email, new_pass)
 
     with tab3:
         v_email = st.text_input("Email to Verify")
@@ -141,7 +154,7 @@ with tab_overview:
                     return row.iloc[0]['value'], row.iloc[0]['unit']
                 return None, None
 
-            test_val, test_unit = get_metric_latest("Testosterone")
+            test_val, test_unit = get_metric_latest("Testosterone, Total")
             if test_val: c1.metric("Testosterone", f"{test_val} {test_unit}")
 
             vit_val, vit_unit = get_metric_latest("Vitamin D")
@@ -159,13 +172,6 @@ with tab_overview:
 
             if not chart_data.empty:
                 fig = px.line(chart_data, x="Date", y="value", title=f"{selected_metric} History", markers=True)
-                
-                try:
-                    low = float(chart_data.iloc[0]['range_low'])
-                    high = float(chart_data.iloc[0]['range_high'])
-                    fig.add_hrect(y0=low, y1=high, line_width=0, fillcolor="green", opacity=0.1, annotation_text="Optimal")
-                except:
-                    pass 
                 st.plotly_chart(fig, use_container_width=True)
         
         with st.expander("View Raw Database Records"):
