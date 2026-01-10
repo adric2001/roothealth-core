@@ -3,7 +3,7 @@ import boto3
 import pandas as pd
 import plotly.express as px
 import os
-import time 
+import time
 from pycognito import Cognito
 from boto3.dynamodb.conditions import Key
 
@@ -17,7 +17,6 @@ BUCKET_NAME = os.environ.get('S3_BUCKET_NAME', 'roothealth-raw-files-adric')
 st.set_page_config(page_title="RootHealth", page_icon="🧬", layout="wide")
 
 def init_auth(username=None):
-    """Initialize Cognito connection with optional username"""
     if not USER_POOL_ID or not CLIENT_ID:
         st.error("⚠️ Auth Configuration Missing! Check environment variables.")
         st.stop()
@@ -55,7 +54,7 @@ if 'username' not in st.session_state:
     st.session_state.username = None
 
 if not st.session_state.authenticated:
-    st.title("🧬 RootHealth Access (Beta)")
+    st.title("🧬 RootHealth Access")
     
     tab1, tab2, tab3 = st.tabs(["Log In", "Sign Up", "Verify Account"])
     
@@ -174,26 +173,28 @@ with tab_overview:
 
 with tab_upload:
     st.header("Upload Lab Results")
-    st.write("Upload your blood work CSV or PDF here. We will process it and auto-refresh when done.")
+    st.write("Upload your blood work CSV or PDF files here.")
     
-    uploaded_file = st.file_uploader("Choose a file", type=["csv", "pdf"])
+    uploaded_files = st.file_uploader("Choose files", type=["csv", "pdf"], accept_multiple_files=True)
 
-    if uploaded_file is not None:
-        if st.button("Process File"):
+    if uploaded_files:
+        if st.button("Process Files"):
             try:
-                file_path = f"uploads/{st.session_state.username}/{uploaded_file.name}"
-                
-                with st.spinner("Uploading to secure cloud storage..."):
-                    s3.put_object(
-                        Bucket=BUCKET_NAME, 
-                        Key=file_path, 
-                        Body=uploaded_file.getvalue()
-                    )
+                target_paths = []
+                with st.spinner(f"Uploading {len(uploaded_files)} files..."):
+                    for uploaded_file in uploaded_files:
+                        file_path = f"uploads/{st.session_state.username}/{uploaded_file.name}"
+                        s3.put_object(
+                            Bucket=BUCKET_NAME, 
+                            Key=file_path, 
+                            Body=uploaded_file.getvalue()
+                        )
+                        target_paths.append(file_path)
 
-                progress_text = "Analysis in progress. This typically takes 10-20 seconds..."
+                progress_text = "Analysis in progress..."
                 my_bar = st.progress(0, text=progress_text)
                 
-                max_retries = 15 
+                max_retries = 20 
                 success = False
                 
                 for i in range(max_retries):
@@ -208,22 +209,26 @@ with tab_upload:
                         )
                         items = response.get('Items', [])
                         
-                        new_data_found = any(item.get('source_file') == file_path for item in items)
+                        found_files = set()
+                        for item in items:
+                            if item.get('source_file') in target_paths:
+                                found_files.add(item.get('source_file'))
                         
-                        if new_data_found:
+                        if len(found_files) >= len(target_paths):
                             my_bar.progress(100, text="Processing Complete!")
                             success = True
                             break
                     except Exception as e:
-                        print(f"Polling error: {e}") 
+                        pass
                 
                 if success:
-                    st.success("✅ Data processed successfully! Refreshing dashboard...")
+                    st.success("✅ All files processed successfully! Refreshing...")
                     time.sleep(1)
-                    st.rerun() 
+                    st.rerun()
                 else:
-                    my_bar.empty()
-                    st.warning("⚠️ Processing is taking longer than usual. The data will appear shortly. You can manually refresh later.")
+                    st.warning("Processing is running in the background. Data will appear shortly.")
+                    time.sleep(2)
+                    st.rerun()
 
             except Exception as e:
                 st.error(f"Upload failed: {e}")

@@ -24,22 +24,35 @@ def parse_date(date_text):
 
 def clean_value(val):
     if not val: return None
-    
     if val.upper() in ["FRE", "KS", "EZ", "Z3E", "MDF", "SEE NOTE", "PAGE", "OF"]: return None
     match = re.search(r'([<>]?)\s*(\d+(\.\d+)?)', val)
     if match: return match.group(2)
     return None
 
-def process_pdf(bucket, key, user_id, file_key, upload_timestamp, table):
-    print(f"📄 Starting FULL analysis for {key}...")
+def normalize_metric_name(name):
+    if not name: return ""
+    name = name.upper().strip()
+    name = re.sub(r'\s+', ' ', name)
+    name = name.replace(',', ', ')
+    name = name.replace(' ,', ',')
+    name = name.replace(',  ', ', ')
     
+    if "TESTOSTERONE" in name and "TOTAL" in name:
+        if "FREE" not in name or "MS TESTOSTERONE" in name: 
+             return "TESTOSTERONE, TOTAL"
+             
+    if "ESTRADIOL" in name and "ULTRASENSITIVE" in name:
+        return "ESTRADIOL, ULTRASENSITIVE"
+
+    return name.title()
+
+def process_pdf(bucket, key, user_id, file_key, upload_timestamp, table):
     start_response = textract.start_document_analysis(
         DocumentLocation={'S3Object': {'Bucket': bucket, 'Name': key}},
         FeatureTypes=['TABLES', 'QUERIES'],
         QueriesConfig={'Queries': [{'Text': "Date Collected?", 'Alias': "DATE_COLLECTED"}]}
     )
     job_id = start_response['JobId']
-    
     
     status = "IN_PROGRESS"
     while status == "IN_PROGRESS":
@@ -48,28 +61,18 @@ def process_pdf(bucket, key, user_id, file_key, upload_timestamp, table):
         status = response['JobStatus']
         
     if status != "SUCCEEDED":
-        print(f"❌ Textract Failed: {status}")
         return
 
-    
     all_blocks = []
     next_token = None
-    
     while True:
         params = {'JobId': job_id}
-        if next_token:
-            params['NextToken'] = next_token
-            
+        if next_token: params['NextToken'] = next_token
         response = textract.get_document_analysis(**params)
         all_blocks.extend(response['Blocks'])
-        
         next_token = response.get('NextToken')
-        if not next_token:
-            break
+        if not next_token: break
             
-    print(f"   -> Retrieved {len(all_blocks)} blocks of data.")
-
-    
     collection_date = upload_timestamp 
     text_map = {b['Id']: b['Text'] for b in all_blocks if 'Text' in b}
     
@@ -82,7 +85,6 @@ def process_pdf(bucket, key, user_id, file_key, upload_timestamp, table):
                     parsed = parse_date(raw_date)
                     if parsed: collection_date = parsed
 
-    
     with table.batch_writer() as batch:
         for block in all_blocks:
             if block['BlockType'] == 'TABLE':
@@ -103,24 +105,33 @@ def process_pdf(bucket, key, user_id, file_key, upload_timestamp, table):
                                                     txt += text_map.get(wid, "") + " "
                                     cell_map[(row, col)] = txt.strip()
                 
-                
                 max_row = max([r for r, c in cell_map.keys()] or [0])
                 for r in range(1, max_row + 1):
-                    test_name = cell_map.get((r, 1), "")
+                    raw_name = cell_map.get((r, 1), "")
                     
-                    if len(test_name) < 2 or len(test_name) > 80: continue
-                    bad_words = ["Test Name", "Reference Range", "DOB:", "Patient", "Gender", "Collected:", "Received:", "Reported:"]
-                    if any(w in test_name for w in bad_words): continue
+                    if len(raw_name) < 3: continue
+                    if re.match(r'^[\d\.\-]+$', raw_name.replace(' ', '')): continue
+                    
+                    bad_phrases = [
+                        "HIGHER RELATIVE", "CONSIDER EXCLUDE", "FOR ADDITIONAL INFORMATION", 
+                        "PURPOSES ONLY", "Z SCORE", "REFERENCE RANGE", "PAGE OF", 
+                        "LAB REF", "COLLECTED", "RECEIVED", "REPORTED", "SEE NOTE",
+                        "PLEASE REFER TO", "INTERPRETATION"
+                    ]
+                    if any(phrase in raw_name.upper() for phrase in bad_phrases): continue
+                    if len(raw_name) > 60: continue
 
-                    raw_val = clean_value(cell_map.get((r, 3), ""))
+                    test_name = normalize_metric_name(raw_name)
+
+                    raw_val = clean_value(cell_map.get((r, 2), ""))
                     if not raw_val:
-                        raw_val = clean_value(cell_map.get((r, 2), ""))
+                        raw_val = clean_value(cell_map.get((r, 3), ""))
                         
                     if raw_val:
-                        print(f"   -> Found {test_name}: {raw_val}")
+                        item_id = f"{test_name}_{file_key}".replace(" ", "_")
                         item = {
                             'user_id': user_id,
-                            'record_id': f"{test_name}_{file_key}",
+                            'record_id': item_id, 
                             'metric': test_name,
                             'value': raw_val,
                             'unit': 'extracted',
@@ -143,5 +154,4 @@ def lambda_handler(event, context):
             
         return {"statusCode": 200, "body": "Success"}
     except Exception as e:
-        print(f"❌ Error: {str(e)}")
         raise e
