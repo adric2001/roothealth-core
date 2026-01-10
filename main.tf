@@ -281,13 +281,6 @@ resource "aws_elastic_beanstalk_environment" "env" {
     name      = "INVITE_CODE"
     value     = "PLACEHOLDER_MANAGED_BY_GITHUB" 
   }
-  lifecycle {
-    ignore_changes = [
-      version_label,
-      # Add this line so Terraform doesn't revert your GitHub Secret
-      setting 
-    ]
-  }
 }
 
 
