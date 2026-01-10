@@ -44,6 +44,17 @@ st.markdown("""
     .delta-negative { color: #FF5252; font-size: 0.8rem; font-weight: 600; background: rgba(255, 82, 82, 0.1); padding: 2px 6px; border-radius: 4px; }
     .delta-neutral { color: #8F9BB3; font-size: 0.8rem; }
 
+    .stack-card {
+        background-color: #1A1C24;
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 12px;
+        margin-bottom: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+
     @media (max-width: 600px) {
         .metric-value { font-size: 1.4rem; }
     }
@@ -340,48 +351,63 @@ elif page == "Profile & Stack":
     prof = get_user_profile()
     
     with st.container(border=True):
-        st.subheader("Bio Profile")
-        with st.form("prof_form"):
-            c1, c2 = st.columns(2)
-            age = c1.number_input("Age", value=int(prof.get('age', 25)), step=1)
-            weight = c1.number_input("Current Weight (lbs)", value=float(prof.get('weight', 180)))
-            gender = c1.selectbox("Gender", ["Male", "Female"], index=0 if prof.get('gender') == "Male" else 1)
-            
-            height = c2.text_input("Height", value=prof.get('height', ""))
-            goal = c2.selectbox("Primary Goal", [
-                "Optimization / Longevity", 
-                "Muscle Gain / Hypertrophy", 
-                "Fat Loss", 
-                "Cognitive Performance", 
-                "Libido / Hormone Health"
-            ], index=0)
-            
-            if st.form_submit_button("Save Profile"):
-                save_user_profile(age, height, gender, goal, weight)
-                st.rerun()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Age", prof.get('age', 'N/A'))
+        c2.metric("Weight", f"{prof.get('weight', 'N/A')} lbs")
+        c3.metric("Height", prof.get('height', 'N/A'))
+        
+        with st.expander("Edit Profile Details"):
+            with st.form("prof_form"):
+                ec1, ec2 = st.columns(2)
+                age = ec1.number_input("Age", value=int(prof.get('age', 25)), step=1)
+                weight = ec1.number_input("Current Weight (lbs)", value=float(prof.get('weight', 180)))
+                gender = ec1.selectbox("Gender", ["Male", "Female"], index=0 if prof.get('gender') == "Male" else 1)
+                
+                height = ec2.text_input("Height", value=prof.get('height', ""))
+                goal = ec2.selectbox("Primary Goal", [
+                    "Optimization / Longevity", 
+                    "Muscle Gain / Hypertrophy", 
+                    "Fat Loss", 
+                    "Cognitive Performance", 
+                    "Libido / Hormone Health"
+                ], index=0)
+                
+                if st.form_submit_button("Save Profile"):
+                    save_user_profile(age, height, gender, goal, weight)
+                    st.rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)
     
     with st.container(border=True):
-        st.subheader("Supplement Stack")
-        c1, c2 = st.columns([2, 1])
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            st.subheader("Supplement Stack")
+            
+            try: 
+                items = supp_table.query(KeyConditionExpression=Key('user_id').eq(st.session_state.username)).get('Items', [])
+                if not items:
+                    st.info("Stack is empty.")
+                else:
+                    for item in items:
+                        col_a, col_b, col_c = st.columns([3, 2, 1])
+                        col_a.markdown(f"**{item['item_name']}**")
+                        col_a.caption(f"{item['dosage']}")
+                        col_b.markdown(f"*{item['frequency']}*")
+                        if col_c.button("🗑️", key=f"del_{item['item_name']}"):
+                            supp_table.delete_item(Key={'user_id': st.session_state.username, 'item_name': item['item_name']})
+                            st.rerun()
+                        st.markdown("---")
+            except: pass
+            
         with c2:
-            st.caption("Add New Item")
+            st.subheader("Add New Item")
             with st.form("stack_add"):
                 n = st.text_input("Name")
                 d = st.text_input("Dose")
                 f = st.selectbox("Freq", ["Daily", "AM/PM", "Weekly", "EOD"])
-                if st.form_submit_button("Add Item"):
+                if st.form_submit_button("Add to Stack"):
                     supp_table.put_item(Item={'user_id': st.session_state.username, 'item_name': n, 'dosage': d, 'frequency': f})
                     st.rerun()
-        with c1:
-            try: 
-                items = supp_table.query(KeyConditionExpression=Key('user_id').eq(st.session_state.username)).get('Items', [])
-                if items: 
-                    st.dataframe(pd.DataFrame(items)[['item_name', 'dosage', 'frequency']], use_container_width=True, hide_index=True)
-                else:
-                    st.info("Stack is empty.")
-            except: pass
 
 elif page == "Coaching":
     st.header("Coaching Portal")
