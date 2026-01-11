@@ -236,7 +236,10 @@ resource "aws_iam_role_policy" "eb_app_permissions" {
     Statement = [
       {
         Effect = "Allow"
-        Action = ["dynamodb:Scan", "dynamodb:Query", "dynamodb:GetItem", "dynamodb:PutItem"]
+        Action = [
+            "dynamodb:Scan", "dynamodb:Query", "dynamodb:GetItem", "dynamodb:PutItem",
+            "dynamodb:BatchWriteItem", "dynamodb:DeleteItem"
+        ]
         Resource = [
             aws_dynamodb_table.health_stats.arn, 
             aws_dynamodb_table.supplements.arn,
@@ -245,16 +248,18 @@ resource "aws_iam_role_policy" "eb_app_permissions" {
       },
       {
         Effect = "Allow"
-        Action = ["s3:PutObject", "s3:GetObject"]
-        Resource = "${aws_s3_bucket.raw_data.arn}/*"
+        Action = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:ListBucket"]
+        Resource = ["${aws_s3_bucket.raw_data.arn}", "${aws_s3_bucket.raw_data.arn}/*"]
       },
       {
         Effect = "Allow"
-        Action = [
-            "bedrock:InvokeModel",
-            "bedrock:ListFoundationModels"
-        ]
+        Action = ["bedrock:InvokeModel", "bedrock:ListFoundationModels"]
         Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = ["cognito-idp:AdminDeleteUser", "cognito-idp:ListUsers"]
+        Resource = aws_cognito_user_pool.users.arn
       }
     ]
   })
@@ -263,7 +268,7 @@ resource "aws_iam_role_policy" "eb_app_permissions" {
 resource "aws_elastic_beanstalk_environment" "env" {
   name                = "RoothealthCore-env"
   application         = aws_elastic_beanstalk_application.app.name
-  solution_stack_name = "64bit Amazon Linux 2023 v4.4.0 running Docker"
+  solution_stack_name = "64bit Amazon Linux 2023 v4.9.0 running Docker"
   
   lifecycle {
     ignore_changes = [version_label, setting]
