@@ -38,6 +38,7 @@ st.markdown("""
     .delta-positive { color: #00E676; font-size: 0.8rem; font-weight: 600; background: rgba(0, 230, 118, 0.1); padding: 2px 6px; border-radius: 4px; }
     .delta-negative { color: #FF5252; font-size: 0.8rem; font-weight: 600; background: rgba(255, 82, 82, 0.1); padding: 2px 6px; border-radius: 4px; }
     .delta-neutral { color: #8F9BB3; font-size: 0.8rem; }
+    .admin-banner { background-color: #FF5252; color: white; padding: 10px; text-align: center; border-radius: 8px; margin-bottom: 20px; font-weight: bold; }
     @media (max-width: 600px) { .metric-value { font-size: 1.4rem; } }
 </style>
 """, unsafe_allow_html=True)
@@ -100,73 +101,60 @@ def get_optimal_ranges(profile):
         })
     return ranges
 
-def save_user_preferences(metrics_list):
-    try: table.put_item(Item={'user_id': st.session_state.username, 'record_id': 'USER_SETTINGS', 'favorites': metrics_list, 'upload_timestamp': str(int(time.time()))}); return True
+def save_user_preferences(uid, metrics_list):
+    try: table.put_item(Item={'user_id': uid, 'record_id': 'USER_SETTINGS', 'favorites': metrics_list, 'upload_timestamp': str(int(time.time()))}); return True
     except: return False
 
-def get_user_preferences():
-    try: return table.get_item(Key={'user_id': st.session_state.username, 'record_id': 'USER_SETTINGS'}).get('Item', {}).get('favorites', [])
+def get_user_preferences(uid):
+    try: return table.get_item(Key={'user_id': uid, 'record_id': 'USER_SETTINGS'}).get('Item', {}).get('favorites', [])
     except: return ["Testosterone, Total", "Vitamin D", "Ferritin", "Body Weight"]
 
-def save_user_profile(age, height, gender, goal, weight):
+def save_user_profile(uid, age, height, gender, goal, weight):
     try: 
-        table.put_item(Item={'user_id': st.session_state.username, 'record_id': 'USER_PROFILE', 'age': age, 'height': height, 'gender': gender, 'goal': goal, 'weight': weight, 'upload_timestamp': str(int(time.time()))})
+        table.put_item(Item={'user_id': uid, 'record_id': 'USER_PROFILE', 'age': age, 'height': height, 'gender': gender, 'goal': goal, 'weight': weight, 'upload_timestamp': str(int(time.time()))})
         st.success("Profile Saved!")
         time.sleep(1)
     except: st.error("Error")
 
-def get_user_profile():
-    try: return table.get_item(Key={'user_id': st.session_state.username, 'record_id': 'USER_PROFILE'}).get('Item', {})
+def get_user_profile(uid):
+    try: return table.get_item(Key={'user_id': uid, 'record_id': 'USER_PROFILE'}).get('Item', {})
     except: return {}
 
-def update_manual_data(df_changes):
+def update_manual_data(uid, df_changes):
     for index, row in df_changes.iterrows():
         try:
             ts = str(int(row['Date'].timestamp())) if pd.notnull(row['Date']) else str(int(time.time()))
             rec_id = row.get('record_id')
             if not rec_id or pd.isna(rec_id): rec_id = f"{str(row['metric']).replace(' ', '_')}_{ts}"
-            table.put_item(Item={'user_id': st.session_state.username, 'record_id': rec_id, 'metric': row['metric'], 'value': str(row['value']), 'unit': row['unit'], 'upload_timestamp': ts, 'source_file': 'Manual_Edit'})
+            table.put_item(Item={'user_id': uid, 'record_id': rec_id, 'metric': row['metric'], 'value': str(row['value']), 'unit': row['unit'], 'upload_timestamp': ts, 'source_file': 'Manual_Edit'})
         except Exception as e: st.error(f"Failed: {e}")
 
 def admin_get_all_users():
     try:
-        # 1. Get from DynamoDB
         scan = table.scan(ProjectionExpression="user_id")
-        db_users = set(item['user_id'] for item in scan['Items'])
-        # 2. Get from Cognito
-        cog_users = cognito_client.list_users(UserPoolId=USER_POOL_ID)
-        for u in cog_users.get('Users', []):
-            for attr in u['Attributes']:
-                if attr['Name'] == 'email': db_users.add(attr['Value'])
-        return list(db_users)
+        return list(set(item['user_id'] for item in scan['Items']))
     except: return []
+
+def admin_get_user_info(uid):
+    try:
+        resp = cognito_client.admin_get_user(UserPoolId=USER_POOL_ID, Username=uid)
+        return {attr['Name']: attr['Value'] for attr in resp['UserAttributes']}
+    except: return {}
 
 def admin_nuke_user(target_user_id):
     try:
-        # 1. DynamoDB
         scan_stats = table.query(KeyConditionExpression=Key('user_id').eq(target_user_id))
         with table.batch_writer() as batch:
             for item in scan_stats['Items']: batch.delete_item(Key={'user_id': target_user_id, 'record_id': item['record_id']})
-        
         scan_supps = supp_table.query(KeyConditionExpression=Key('user_id').eq(target_user_id))
         with supp_table.batch_writer() as batch:
             for item in scan_supps['Items']: batch.delete_item(Key={'user_id': target_user_id, 'item_name': item['item_name']})
-        
-        # 2. S3
         objects = s3.list_objects_v2(Bucket=BUCKET_NAME, Prefix=f"uploads/{target_user_id}/")
-        if 'Contents' in objects:
-            s3.delete_objects(Bucket=BUCKET_NAME, Delete={'Objects': [{'Key': obj['Key']} for obj in objects['Contents']]})
-
-        # 3. Cognito (Delete Login)
-        try:
-            cognito_client.admin_delete_user(UserPoolId=USER_POOL_ID, Username=target_user_id)
-        except cognito_client.exceptions.UserNotFoundException:
-            pass # Already gone
-            
+        if 'Contents' in objects: s3.delete_objects(Bucket=BUCKET_NAME, Delete={'Objects': [{'Key': obj['Key']} for obj in objects['Contents']]})
+        try: cognito_client.admin_delete_user(UserPoolId=USER_POOL_ID, Username=target_user_id)
+        except: pass
         return True
-    except Exception as e:
-        st.error(f"Nuke Error: {e}")
-        return False
+    except Exception as e: st.error(f"Error: {e}"); return False
 
 def init_auth(username=None):
     if not USER_POOL_ID or not CLIENT_ID: st.stop()
@@ -201,6 +189,7 @@ def get_data(uid):
 if 'authenticated' not in st.session_state: st.session_state.authenticated = False
 if 'username' not in st.session_state: st.session_state.username = None
 if 'is_admin' not in st.session_state: st.session_state.is_admin = False
+if 'impersonate_id' not in st.session_state: st.session_state.impersonate_id = None
 
 if not st.session_state.authenticated:
     st.title("🧬 RootHealth")
@@ -222,24 +211,59 @@ if not st.session_state.authenticated:
         if st.button("Verify"): confirm_user(ve, vc)
     st.stop()
 
-if st.session_state.is_admin:
+# --- ADMIN VIEW ---
+if st.session_state.is_admin and not st.session_state.impersonate_id:
     st.sidebar.title("⚠️ Root Admin")
-    if st.sidebar.button("Log Out"): st.session_state.authenticated = False; st.session_state.is_admin = False; st.rerun()
-    st.header("Admin Panel")
+    if st.sidebar.button("Log Out"): 
+        st.session_state.authenticated = False; st.session_state.is_admin = False; st.rerun()
+    
+    st.header("Admin Command Center")
     all_users = admin_get_all_users()
+    
+    # Global Stats
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Users", len(all_users))
+    c2.metric("Total Tables", "3")
+    c3.metric("System Status", "Healthy") # Placeholder for CloudWatch check
+
     with st.container(border=True):
-        target = st.selectbox("Manage User", all_users)
-        if target:
-            c1, c2 = st.columns(2)
-            with c1: 
-                u_data = get_data(target)
-                st.metric("Records", len(u_data))
-            with c2:
-                if st.button("🗑️ DELETE ACCOUNT (PERMANENT)", type="primary"):
-                    if admin_nuke_user(target): st.success("User Nuked"); time.sleep(2); st.rerun()
+        st.subheader("User Management")
+        target_user = st.selectbox("Select User", all_users)
+        
+        if target_user:
+            u_info = admin_get_user_info(target_user)
+            u_data = get_data(target_user)
+            
+            # User Details Expander
+            with st.expander(f"Inspector: {target_user}", expanded=True):
+                col_a, col_b = st.columns(2)
+                col_a.write(f"**Cognito Status:** {u_info.get('email_verified', 'Unknown')}")
+                col_a.write(f"**Created:** {u_info.get('sub', 'Unknown')}")
+                col_b.metric("Data Points", len(u_data))
+                
+                # GOD MODE
+                if col_b.button("👁️ IMPERSONATE USER", type="primary"):
+                    st.session_state.impersonate_id = target_user
+                    st.rerun()
+
+            # Danger Zone
+            st.divider()
+            if st.button("🗑️ NUKE USER (DATA + LOGIN)", type="secondary"):
+                if admin_nuke_user(target_user):
+                    st.success("User Terminated")
+                    time.sleep(2); st.rerun()
     st.stop()
 
+# --- USER VIEW (OR IMPERSONATION) ---
+active_user = st.session_state.impersonate_id if st.session_state.impersonate_id else st.session_state.username
+
 with st.sidebar:
+    if st.session_state.impersonate_id:
+        st.markdown("<div class='admin-banner'>👁️ GOD MODE<br>Viewing: " + active_user + "</div>", unsafe_allow_html=True)
+        if st.button("Exit God Mode"):
+            st.session_state.impersonate_id = None
+            st.rerun()
+    
     st.title("🧬 RootHealth")
     page = st.radio("Navigation", ["Dashboard", "Data Manager", "AI Coach", "Profile & Stack", "Coaching"], label_visibility="collapsed")
     st.markdown("---")
@@ -254,29 +278,29 @@ with st.sidebar:
         if st.form_submit_button("Save Log"):
             ts = str(int(time.time()))
             for n,v,u in [("Body Weight",w,"lbs"),("Sleep Duration",sleep,"hrs"),("Energy Level",energy,"/10"),("Stress Level",stress,"/10")]:
-                table.put_item(Item={'user_id': st.session_state.username, 'record_id': f"{n.replace(' ','_')}_{ts}", 'metric': n, 'value': str(v), 'unit': u, 'upload_timestamp': ts, 'source_file': 'Daily_Log'})
+                table.put_item(Item={'user_id': active_user, 'record_id': f"{n.replace(' ','_')}_{ts}", 'metric': n, 'value': str(v), 'unit': u, 'upload_timestamp': ts, 'source_file': 'Daily_Log'})
             st.success("Logged!"); time.sleep(1); st.rerun()
-    if st.button("Log Out"): st.session_state.authenticated = False; st.rerun()
+    if not st.session_state.impersonate_id and st.button("Log Out"): st.session_state.authenticated = False; st.rerun()
 
-raw_data = get_data(st.session_state.username)
+raw_data = get_data(active_user)
 df = pd.DataFrame(raw_data)
 if not df.empty:
     df['value'] = pd.to_numeric(df['value'], errors='coerce')
     df['Date'] = pd.to_datetime(pd.to_numeric(df['upload_timestamp'].fillna(0)), unit='s')
     df = df.dropna(subset=['value']).sort_values(by='Date')
 
-prof = get_user_profile()
+prof = get_user_profile(active_user)
 
 if page == "Dashboard":
     st.header("Dashboard")
     if df.empty: st.info("👋 Welcome! Upload labs to start.")
     else:
         all_metrics = sorted(df['metric'].unique().tolist())
-        saved_faves = get_user_preferences()
+        saved_faves = get_user_preferences(active_user)
         current_faves = [m for m in saved_faves if m in all_metrics]
         with st.popover("⚙️ Customize Widgets"):
             new_faves = st.multiselect("Visible Metrics", all_metrics, default=current_faves)
-            if st.button("Save Layout"): save_user_preferences(new_faves); st.rerun()
+            if st.button("Save Layout"): save_user_preferences(active_user, new_faves); st.rerun()
         if current_faves:
             cols = st.columns(3)
             for i, metric in enumerate(current_faves):
@@ -301,11 +325,11 @@ if page == "Dashboard":
             heat_df = pd.DataFrame({'Date': pd.date_range(start, end)}).merge(daily_counts, on='Date', how='left').fillna(0)
             heat_df['Week'] = heat_df['Date'].dt.isocalendar().week
             heat_df['Day'] = heat_df['Date'].dt.day_name()
-            fig = go.Figure(data=go.Heatmap(z=heat_df['logs'], x=heat_df['Week'], y=heat_df['Day'], colorscale=[[0,'#161B22'],[0.1,'#0E4429'],[1,'#39D353']], showscale=False, xgap=3, ygap=3))
-            fig.update_layout(height=180, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", yaxis=dict(showgrid=False, categoryorder='array', categoryarray=['Sunday', 'Saturday', 'Friday', 'Thursday', 'Wednesday', 'Tuesday', 'Monday']), xaxis=dict(showgrid=False, showticklabels=False), margin=dict(l=0,r=0,t=10,b=10))
-            st.plotly_chart(fig, use_container_width=True)
+            heat_df['Color'] = heat_df['logs'].apply(lambda x: 0 if x==0 else 1 if x==1 else 2 if x<3 else 3)
+            fig_heat = go.Figure(data=go.Heatmap(z=heat_df['logs'], x=heat_df['Week'], y=heat_df['Day'], colorscale=[[0,'#161B22'],[0.1,'#0E4429'],[1,'#39D353']], showscale=False, xgap=3, ygap=3))
+            fig_heat.update_layout(height=180, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", yaxis=dict(showgrid=False, categoryorder='array', categoryarray=['Sunday', 'Saturday', 'Friday', 'Thursday', 'Wednesday', 'Tuesday', 'Monday']), xaxis=dict(showgrid=False, showticklabels=False), margin=dict(l=0,r=0,t=10,b=10))
+            st.plotly_chart(fig_heat, use_container_width=True)
         else: st.info("Log daily stats to see streak.")
-        
         st.subheader("Deep Dive")
         c1, c2 = st.columns([1, 2])
         with c1:
@@ -333,14 +357,14 @@ elif page == "Data Manager":
         if files and st.button("Process", type="primary"):
             bar = st.progress(0, text="Uploading...")
             for i, f in enumerate(files):
-                s3.put_object(Bucket=BUCKET_NAME, Key=f"uploads/{st.session_state.username}/{f.name}", Body=f.getvalue())
+                s3.put_object(Bucket=BUCKET_NAME, Key=f"uploads/{active_user}/{f.name}", Body=f.getvalue())
                 bar.progress((i+1)/len(files))
             st.success("Processing!")
     with t2:
         if not df.empty: st.download_button("Download CSV", df.to_csv(index=False).encode('utf-8'), "data.csv")
         edit_df = df[['metric', 'value', 'unit', 'Date', 'record_id']].copy() if not df.empty else pd.DataFrame(columns=['metric', 'value', 'unit', 'Date', 'record_id'])
         edited = st.data_editor(edit_df, num_rows="dynamic", use_container_width=True, hide_index=True)
-        if st.button("Save"): update_manual_data(edited); st.success("Updated!"); time.sleep(1); st.rerun()
+        if st.button("Save"): update_manual_data(active_user, edited); st.success("Updated!"); time.sleep(1); st.rerun()
 
 elif page == "AI Coach":
     st.header("Intelligence Center")
@@ -361,7 +385,7 @@ elif page == "AI Coach":
     with c2:
         if st.button("⚡ Run Full Audit", type="primary"):
             with st.spinner("Thinking..."):
-                try: stack = supp_table.query(KeyConditionExpression=Key('user_id').eq(st.session_state.username)).get('Items', [])
+                try: stack = supp_table.query(KeyConditionExpression=Key('user_id').eq(active_user)).get('Items', [])
                 except: stack = []
                 st.markdown(run_ai_coach(df, stack, prof))
 
@@ -380,7 +404,7 @@ elif page == "Profile & Stack":
                 g = ec1.selectbox("Gender", ["Male", "Female"], index=0 if prof.get('gender')=="Male" else 1)
                 h = ec2.text_input("Height", value=prof.get('height', "5'10"))
                 goal = ec2.selectbox("Goal", ["Optimization", "Muscle", "Fat Loss", "Brain", "Libido"], index=0)
-                if st.form_submit_button("Save"): save_user_profile(age, h, g, goal, w); st.rerun()
+                if st.form_submit_button("Save"): save_user_profile(active_user, age, h, g, goal, w); st.rerun()
     st.markdown("<br>", unsafe_allow_html=True)
     with st.container(border=True):
         c1, c2 = st.columns([1, 1])
@@ -388,31 +412,31 @@ elif page == "Profile & Stack":
             st.subheader("Stack")
             if st.button("🗑️ Clear All", type="secondary"):
                 try: 
-                    for i in supp_table.query(KeyConditionExpression=Key('user_id').eq(st.session_state.username))['Items']: supp_table.delete_item(Key={'user_id': st.session_state.username, 'item_name': i['item_name']})
+                    for i in supp_table.query(KeyConditionExpression=Key('user_id').eq(active_user))['Items']: supp_table.delete_item(Key={'user_id': active_user, 'item_name': i['item_name']})
                     st.rerun()
                 except: pass
             try:
-                for i in supp_table.query(KeyConditionExpression=Key('user_id').eq(st.session_state.username))['Items']:
+                for i in supp_table.query(KeyConditionExpression=Key('user_id').eq(active_user))['Items']:
                     a, b, c = st.columns([3, 2, 1])
                     a.markdown(f"**{i['item_name']}**"); a.caption(i['dosage']); b.write(i['frequency'])
-                    if c.button("🗑️", key=f"del_{i['item_name']}"): supp_table.delete_item(Key={'user_id': st.session_state.username, 'item_name': i['item_name']}); st.rerun()
+                    if c.button("🗑️", key=f"del_{i['item_name']}"): supp_table.delete_item(Key={'user_id': active_user, 'item_name': i['item_name']}); st.rerun()
                     st.markdown("---")
             except: pass
         with c2:
             st.subheader("Add Item")
             with st.form("stack"):
                 n = st.text_input("Name"); d = st.text_input("Dose"); f = st.selectbox("Freq", ["Daily", "AM/PM", "Weekly"])
-                if st.form_submit_button("Add"): supp_table.put_item(Item={'user_id': st.session_state.username, 'item_name': n, 'dosage': d, 'frequency': f}); st.rerun()
+                if st.form_submit_button("Add"): supp_table.put_item(Item={'user_id': active_user, 'item_name': n, 'dosage': d, 'frequency': f}); st.rerun()
 
 elif page == "Coaching":
     st.header("Coaching")
     role = st.radio("Mode", ["Client", "Coach"], horizontal=True)
     if role == "Client":
         e = st.text_input("Coach Email")
-        if st.button("Link"): rel_table.put_item(Item={'coach_id': e.lower(), 'client_id': st.session_state.username}); st.success("Done!")
+        if st.button("Link"): rel_table.put_item(Item={'coach_id': e.lower(), 'client_id': active_user}); st.success("Done!")
     else:
         try:
-            cl = rel_table.query(KeyConditionExpression=Key('coach_id').eq(st.session_state.username))['Items']
+            cl = rel_table.query(KeyConditionExpression=Key('coach_id').eq(active_user))['Items']
             sel = st.selectbox("Client", [c['client_id'] for c in cl]) if cl else None
             if sel: st.dataframe(pd.DataFrame(get_data(sel)))
         except: pass
