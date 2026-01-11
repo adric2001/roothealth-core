@@ -12,3 +12,4 @@ services:
       - AWS_REGION
       - DYNAMODB_TABLE
       - S3_BUCKET_NAME
+      - INVITE_CODE
