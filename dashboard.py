@@ -154,7 +154,7 @@ def admin_nuke_user(target_user_id):
         try: cognito_client.admin_delete_user(UserPoolId=USER_POOL_ID, Username=target_user_id)
         except: pass
         return True
-    except Exception as e: st.error(f"Error: {e}"); return False
+    except Exception as e: st.error(f"Nuke Error: {e}"); return False
 
 def init_auth(username=None):
     if not USER_POOL_ID or not CLIENT_ID: st.stop()
@@ -163,15 +163,22 @@ def init_auth(username=None):
 def login_user(username, password):
     if username == ADMIN_EMAIL and password == ADMIN_PASS: return "ADMIN_USER"
     try: u = init_auth(username); u.authenticate(password=password); return u
-    except: return None
+    except Exception as e: return f"Error: {e}"
 
 def register_user(email, password):
-    try: u = init_auth(email); u.set_base_attributes(email=email); u.register(email, password); st.success("Check email code."); return True
-    except: st.error("Failed"); return False
+    try: 
+        u = init_auth(email)
+        u.set_base_attributes(email=email)
+        u.register(email, password)
+        st.success("Check email code.")
+        return True
+    except Exception as e: 
+        st.error(f"Registration Failed: {e}")
+        return False
 
 def confirm_user(email, code):
     try: u = init_auth(email); u.confirm_sign_up(code, username=email); st.success("Verified!"); return True
-    except: st.error("Failed"); return False
+    except Exception as e: st.error(f"Verification Failed: {e}"); return False
 
 def run_ai_coach(user_data, user_stack, user_profile):
     csv_data = user_data.to_csv(index=False)
@@ -198,72 +205,55 @@ if not st.session_state.authenticated:
         e, p = st.text_input("Email"), st.text_input("Password", type="password")
         if st.button("Log In"): 
             user = login_user(e, p)
-            if user == "ADMIN_USER": st.session_state.authenticated = True; st.session_state.username = "ROOT_ADMIN"; st.session_state.is_admin = True; st.rerun()
-            elif user: st.session_state.authenticated = True; st.session_state.username = e; st.session_state.is_admin = False; st.rerun()
+            if user == "ADMIN_USER": 
+                st.session_state.authenticated = True; st.session_state.username = "ROOT_ADMIN"; st.session_state.is_admin = True; st.rerun()
+            elif isinstance(user, str) and "Error" in user:
+                st.error(user)
+            elif user: 
+                st.session_state.authenticated = True; st.session_state.username = e; st.session_state.is_admin = False; st.rerun()
     with t2:
         ne, np = st.text_input("New Email"), st.text_input("New Password", type="password")
         ic = st.text_input("Invite Code", type="password")
         if st.button("Join"): 
             if ic == os.environ.get("INVITE_CODE"): register_user(ne, np)
-            else: st.error("Invalid Code")
+            else: st.error(f"Invalid Code. Expected: {os.environ.get('INVITE_CODE')} (Debug)")
     with t3:
         ve, vc = st.text_input("Verify Email"), st.text_input("Code")
         if st.button("Verify"): confirm_user(ve, vc)
     st.stop()
 
-# --- ADMIN VIEW ---
 if st.session_state.is_admin and not st.session_state.impersonate_id:
     st.sidebar.title("⚠️ Root Admin")
-    if st.sidebar.button("Log Out"): 
-        st.session_state.authenticated = False; st.session_state.is_admin = False; st.rerun()
-    
+    if st.sidebar.button("Log Out"): st.session_state.authenticated = False; st.session_state.is_admin = False; st.rerun()
     st.header("Admin Command Center")
     all_users = admin_get_all_users()
-    
-    # Global Stats
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Users", len(all_users))
     c2.metric("Total Tables", "3")
-    c3.metric("System Status", "Healthy") # Placeholder for CloudWatch check
-
+    c3.metric("System Status", "Healthy")
     with st.container(border=True):
         st.subheader("User Management")
         target_user = st.selectbox("Select User", all_users)
-        
         if target_user:
             u_info = admin_get_user_info(target_user)
             u_data = get_data(target_user)
-            
-            # User Details Expander
             with st.expander(f"Inspector: {target_user}", expanded=True):
                 col_a, col_b = st.columns(2)
                 col_a.write(f"**Cognito Status:** {u_info.get('email_verified', 'Unknown')}")
                 col_a.write(f"**Created:** {u_info.get('sub', 'Unknown')}")
                 col_b.metric("Data Points", len(u_data))
-                
-                # GOD MODE
-                if col_b.button("👁️ IMPERSONATE USER", type="primary"):
-                    st.session_state.impersonate_id = target_user
-                    st.rerun()
-
-            # Danger Zone
+                if col_b.button("👁️ IMPERSONATE USER", type="primary"): st.session_state.impersonate_id = target_user; st.rerun()
             st.divider()
             if st.button("🗑️ NUKE USER (DATA + LOGIN)", type="secondary"):
-                if admin_nuke_user(target_user):
-                    st.success("User Terminated")
-                    time.sleep(2); st.rerun()
+                if admin_nuke_user(target_user): st.success("User Terminated"); time.sleep(2); st.rerun()
     st.stop()
 
-# --- USER VIEW (OR IMPERSONATION) ---
 active_user = st.session_state.impersonate_id if st.session_state.impersonate_id else st.session_state.username
 
 with st.sidebar:
     if st.session_state.impersonate_id:
         st.markdown("<div class='admin-banner'>👁️ GOD MODE<br>Viewing: " + active_user + "</div>", unsafe_allow_html=True)
-        if st.button("Exit God Mode"):
-            st.session_state.impersonate_id = None
-            st.rerun()
-    
+        if st.button("Exit God Mode"): st.session_state.impersonate_id = None; st.rerun()
     st.title("🧬 RootHealth")
     page = st.radio("Navigation", ["Dashboard", "Data Manager", "AI Coach", "Profile & Stack", "Coaching"], label_visibility="collapsed")
     st.markdown("---")
@@ -326,7 +316,7 @@ if page == "Dashboard":
             heat_df['Week'] = heat_df['Date'].dt.isocalendar().week
             heat_df['Day'] = heat_df['Date'].dt.day_name()
             heat_df['Color'] = heat_df['logs'].apply(lambda x: 0 if x==0 else 1 if x==1 else 2 if x<3 else 3)
-            fig_heat = go.Figure(data=go.Heatmap(z=heat_df['logs'], x=heat_df['Week'], y=heat_df['Day'], colorscale=[[0,'#161B22'],[0.1,'#0E4429'],[1,'#39D353']], showscale=False, xgap=3, ygap=3))
+            fig_heat = go.Figure(data=go.Heatmap(z=heat_df['logs'], x=heat_df['Week'], y=heat_df['DayName'], colorscale=[[0,'#161B22'],[0.1,'#0E4429'],[1,'#39D353']], showscale=False, xgap=3, ygap=3))
             fig_heat.update_layout(height=180, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", yaxis=dict(showgrid=False, categoryorder='array', categoryarray=['Sunday', 'Saturday', 'Friday', 'Thursday', 'Wednesday', 'Tuesday', 'Monday']), xaxis=dict(showgrid=False, showticklabels=False), margin=dict(l=0,r=0,t=10,b=10))
             st.plotly_chart(fig_heat, use_container_width=True)
         else: st.info("Log daily stats to see streak.")
