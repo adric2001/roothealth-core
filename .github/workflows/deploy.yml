@@ -33,29 +33,33 @@ jobs:
         docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
-    - name: Deploy to Elastic Beanstalk
+    - name: Prepare Deployment Package
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         ECR_REPOSITORY: roothealth-dashboard
         IMAGE_TAG: ${{ github.sha }}
       run: |
-        # 1. Update the docker-compose.yml to point to the specific image version
+        # Update docker-compose.yml with the new image tag
         sed -i "s|roothealth-dashboard:LATEST_HASH|$ECR_REPOSITORY:$IMAGE_TAG|g" docker-compose.yml
-        # Also ensure the registry part is correct if you used a placeholder
+        # Ensure registry URL is correct
         sed -i "s|123456789012.dkr.ecr.us-east-1.amazonaws.com|$ECR_REGISTRY|g" docker-compose.yml
-
-        # 2. Zip the file
+        
+        # Zip it
         zip deploy.zip docker-compose.yml
 
+    # --- SECRET INJECTION STEP ---
     - name: Update EB Invite Code
       run: |
+        # We assume the environment exists. We update the variable.
+        # QUOTES ARE IMPORTANT HERE!
         aws elasticbeanstalk update-environment \
           --environment-name RoothealthCore-env \
           --application-name roothealth-core \
-          --option-settings Namespace=aws:elasticbeanstalk:application:environment,OptionName=INVITE_CODE,Value=${{ secrets.INVITE_CODE }}
+          --option-settings Namespace=aws:elasticbeanstalk:application:environment,OptionName=INVITE_CODE,Value="${{ secrets.INVITE_CODE }}"
 
-    - name: Wait for Environment Update
+    - name: Wait for Secret Update
       run: |
+        echo "Waiting for environment configuration to settle..."
         aws elasticbeanstalk wait environment-updated --environment-name RoothealthCore-env
 
     - name: Beanstalk Deploy
